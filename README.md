@@ -1,6 +1,38 @@
-# vault
+# Vault
 
 Temporarily lock down sensitive files on your machine. One command to encrypt everything, one to bring it back.
+
+## Why?
+
+Sensitive files sitting on disk are an attack surface. Someone or something could:
+- Run a malicious `postinstall` script that exfiltrates keys
+- Clone a repository with a fake dependency which tries to steal your data
+- Glance at your terminal while you `cat` a config file
+- Run `find ~ -name .env` if they get a moment on your machine
+- Exploit a dependency to read `~/.ssh` or `~/.gnupg`
+
+Vault removes the surface entirely. No files on disk means nothing to steal. Useful before screen shares, pair programming, interviews, live coding, running untrusted code, or just to feel safer.
+
+## How it works
+
+1. **lockdown** reads paths from `~/.config/vault/paths`, optionally scans for `.env` files under `$HOME`, bundles everything into a tar archive, encrypts it with a passphrase using `age -p`, then removes the originals.
+2. **unlock** decrypts the archive with your passphrase and extracts everything back to the original locations.
+
+The vault file lives at `~/.vault.tar.age`. A manifest at `~/.vault-manifest` tracks what was locked (useful for `vault status`).
+
+Passphrase encryption means no keys need to exist on disk — the only secret is in your head.
+
+> ⚠️ *If you lose your passphrase, you will lose access to all locked files.*
+
+## Quickstart
+
+```bash
+brew tap gabrielkoerich/tap
+brew install vault
+vault init
+```
+
+Or just copy the `vault` script somewhere in your `$PATH` and run `vault init`.
 
 ```bash
 $ vault lockdown
@@ -19,25 +51,17 @@ enter your passphrase to decrypt the vault:
 unlocked. all sensitive files restored
 ```
 
-## Why
-
-Sensitive files sitting on disk are an attack surface. Someone or something could:
-- Run a malicious `postinstall` script that exfiltrates keys
-- Clone a repository with a fake dependency which tries to steal your data
-- Glance at your terminal while you `cat` a config file
-- Run `find ~ -name .env` if they get a moment on your machine
-- Exploit a dependency to read `~/.ssh` or `~/.gnupg`
-
-Vault removes the surface entirely. No files on disk means nothing to steal. Useful before screen shares, pair programming, interviews, live coding, running untrusted code, or just to feel safer.
-
-## Install
+## Usage
 
 ```bash
-brew tap gabrielkoerich/tap
-brew install vault
+vault init         # setup config and scan for sensitive files
+vault lockdown     # encrypt and remove sensitive files
+vault unlock       # restore from encrypted vault
+vault scan         # re-scan and update paths
+vault status       # show locked/unlocked state
+vault paths        # list configured paths
+vault version      # show version
 ```
-
-Or just copy the `vault` script somewhere in your `$PATH`.
 
 ### Dependencies
 
@@ -47,17 +71,6 @@ Or just copy the `vault` script somewhere in your `$PATH`.
 - `tar` — bundling (ships with macOS/Linux)
 
 Optional: `trash` (macOS) for recoverable deletion instead of `rm`.
-
-## Usage
-
-```bash
-vault lockdown     # encrypt and remove sensitive files
-vault unlock       # restore from encrypted vault
-vault scan         # auto-detect exposed secrets
-vault status       # show locked/unlocked state
-vault paths        # list configured paths
-vault version      # show version
-```
 
 ## Configuration
 
@@ -120,17 +133,6 @@ See the full default list in [`scan.yml`](scan.yml).
 
 During `vault lockdown`, any `.env` files found under `$HOME` are included after a prompt.
 
-## How it works
-
-1. **lockdown** reads paths from `~/.config/vault/paths`, bundles them into a tar archive, encrypts it with a passphrase using `age -p`, then removes the originals.
-2. **unlock** decrypts the archive with your passphrase and extracts everything back to the original locations.
-
-The vault file lives at `~/.vault.tar.age`. A manifest at `~/.vault-manifest` tracks what was locked (useful for `vault status`).
-
-Passphrase encryption means no keys need to exist on disk — the only secret is in your head.
-
-> ⚠️ *If you lose your passphrase, you will lose access to all locked files.*
-
 ## Environment variables
 
 | Variable | Default | Description |
@@ -138,7 +140,7 @@ Passphrase encryption means no keys need to exist on disk — the only secret is
 | `VAULT_CONFIG_DIR` | `~/.config/vault` | Config directory |
 | `VAULT_FILE` | `~/.vault.tar.age` | Encrypted vault path |
 
-## Ideas
+## Ideas/Roadmap
 
 - **Profiles** — named lockdown profiles (`vault lockdown --profile work`) for different contexts
 - **Hooks** — run custom scripts before/after lockdown and unlock

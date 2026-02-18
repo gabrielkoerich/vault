@@ -6,14 +6,34 @@ CONFIG_DIR="${VAULT_CONFIG_DIR:-$HOME/.config/vault}"
 PATHS_FILE="$CONFIG_DIR/paths"
 SCAN_FILE="$CONFIG_DIR/scan.yml"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SETTINGS_FILE="$CONFIG_DIR/settings"
 VAULT_FILE="${VAULT_FILE:-$HOME/.vault.tar.age}"
 MANIFEST_FILE="${VAULT_FILE%.tar.age}-manifest"
+
+load_settings() {
+  [ -f "$SETTINGS_FILE" ] && source "$SETTINGS_FILE"
+  DELETE_METHOD="${DELETE_METHOD:-trash}"
+  ENV_SCAN_DIRS="${ENV_SCAN_DIRS:-$HOME}"
+  EXCLUDE_PATHS="${EXCLUDE_PATHS:-}"
+}
+
+is_excluded() {
+  local p="$1"
+  [ -z "$EXCLUDE_PATHS" ] && return 1
+  local IFS=','
+  for exc in $EXCLUDE_PATHS; do
+    exc="$(eval echo "$exc")"
+    [[ "$p" == "$exc" || "$p" == "$exc/"* ]] && return 0
+  done
+  return 1
+}
 
 usage() {
   cat <<EOF
 vault $VERSION — lock down sensitive files with age encryption
 
 usage:
+  vault init        setup config and scan for sensitive files
   vault lockdown    encrypt and remove sensitive files from disk
   vault unlock      restore sensitive files from the encrypted vault
   vault scan        scan for exposed secrets and update paths config
@@ -42,34 +62,102 @@ check_deps() {
 
 ensure_config() {
   if [ ! -f "$PATHS_FILE" ]; then
-    echo "error: $PATHS_FILE not found" >&2
-    echo "create it with one sensitive path per line (supports \$HOME)" >&2
-    echo "run 'vault scan' to auto-detect sensitive paths" >&2
+    echo "error: vault is not set up yet" >&2
+    echo "run 'vault init' first" >&2
     exit 1
   fi
 }
 
+is_self() {
+  local p="$1"
+  # skip vault's own config, the vault file, and the vault script
+  [[ "$p" == "$CONFIG_DIR" || "$p" == "$CONFIG_DIR/"* ]] && return 0
+  [[ "$p" == "$VAULT_FILE" || "$p" == "$MANIFEST_FILE" ]] && return 0
+  [[ "$p" == "$(command -v vault 2>/dev/null)" ]] && return 0
+  return 1
+}
+
 read_paths() {
+  load_settings
   local paths=()
   while IFS= read -r line; do
     [[ -z "$line" || "$line" =~ ^# ]] && continue
     local expanded
     expanded="$(eval echo "$line")"
     if [ -e "$expanded" ]; then
+      if is_self "$expanded"; then
+        echo "error: $line points to vault's own files — remove it from $PATHS_FILE" >&2
+        exit 1
+      fi
       paths+=("$expanded")
     fi
   done < "$PATHS_FILE"
 
-  # optionally collect .env files from $HOME
-  read -p "scan for .env files under \$HOME? (Y/n) " -n 1 -r
+  # optionally collect .env files
+  local scan_dirs
+  scan_dirs="$(eval echo "$ENV_SCAN_DIRS")"
+  read -p "scan for .env files under $scan_dirs? (Y/n) " -n 1 -r
   echo ""
   if [[ ! $REPLY =~ ^[Nn]$ ]]; then
     while IFS= read -r envfile; do
+      is_self "$envfile" && continue
+      is_excluded "$envfile" && continue
       paths+=("$envfile")
-    done < <(fd -t f -H -g '.env' "$HOME" 2>/dev/null)
+    done < <(fd -t f -H -g '.env' $scan_dirs 2>/dev/null)
   fi
 
   printf '%s\n' "${paths[@]}"
+}
+
+cmd_init() {
+  check_deps age fd rg
+
+  if [ -f "$SETTINGS_FILE" ]; then
+    echo "vault is already set up ($CONFIG_DIR)"
+    echo "run 'vault scan' to update, or edit files in $CONFIG_DIR directly"
+    return
+  fi
+
+  mkdir -p "$CONFIG_DIR"
+  echo "setting up vault..."
+  echo ""
+
+  # delete method
+  if command -v trash &>/dev/null; then
+    read -p "use trash instead of rm for deletion? (Y/n) " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Nn]$ ]]; then
+      echo "DELETE_METHOD=rm" >> "$SETTINGS_FILE"
+    else
+      echo "DELETE_METHOD=trash" >> "$SETTINGS_FILE"
+    fi
+  else
+    echo "DELETE_METHOD=rm" >> "$SETTINGS_FILE"
+    echo "tip: install 'trash' for recoverable deletion (brew install trash)"
+  fi
+  echo ""
+
+  # .env scan directories
+  read -p "directories to scan for .env files (default: \$HOME): " env_dirs
+  if [ -z "$env_dirs" ]; then
+    echo "ENV_SCAN_DIRS=\$HOME" >> "$SETTINGS_FILE"
+  else
+    echo "ENV_SCAN_DIRS=$env_dirs" >> "$SETTINGS_FILE"
+  fi
+  echo ""
+
+  # excluded paths
+  read -p "paths to exclude from scanning (comma-separated, or blank for none): " excludes
+  if [ -n "$excludes" ]; then
+    echo "EXCLUDE_PATHS=$excludes" >> "$SETTINGS_FILE"
+  fi
+  echo ""
+
+  # run scan
+  cmd_scan
+  echo ""
+  echo "done. review your paths with 'vault paths', then run 'vault lockdown'."
+  echo "config: $CONFIG_DIR"
 }
 
 cmd_lockdown() {
@@ -109,8 +197,9 @@ cmd_lockdown() {
   fi
 
   # remove originals
+  load_settings
   for p in "${paths[@]}"; do
-    if command -v trash &>/dev/null; then
+    if [[ "$DELETE_METHOD" == "trash" ]] && command -v trash &>/dev/null; then
       trash "$p"
     else
       rm -rf "$p"
@@ -120,14 +209,17 @@ cmd_lockdown() {
   echo ""
   echo "locked. sensitive files encrypted to $VAULT_FILE"
   echo "run 'vault unlock' to restore"
-  echo ""
-  read -p "empty trash now? (y/n) " -n 1 -r
-  echo ""
-  if [[ $REPLY =~ ^[Yy]$ ]]; then
-    if [[ "$(uname)" == "Darwin" ]]; then
-      osascript -e 'tell application "Finder" to empty the trash'
+
+  if [[ "$DELETE_METHOD" == "trash" ]]; then
+    echo ""
+    read -p "empty trash now? (y/n) " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+      if [[ "$(uname)" == "Darwin" ]]; then
+        osascript -e 'tell application "Finder" to empty the trash'
+      fi
+      echo "trash emptied"
     fi
-    echo "trash emptied"
   fi
 }
 
@@ -147,6 +239,7 @@ cmd_unlock() {
 
 cmd_scan() {
   check_deps fd rg
+  load_settings
   mkdir -p "$CONFIG_DIR"
   touch "$PATHS_FILE"
 
@@ -188,7 +281,9 @@ cmd_scan() {
     raw="${raw%"${raw##*[![:space:]]}"}"  # trim trailing whitespace
     local expanded
     expanded="$(eval echo "$raw")"
-    [ -e "$expanded" ] && add_path "$expanded" "scan.yml"
+    if [ -e "$expanded" ] && ! is_excluded "$expanded"; then
+      add_path "$expanded" "scan.yml"
+    fi
   done < "$SCAN_FILE"
 
   # scan shell files for exported secrets
@@ -198,10 +293,13 @@ cmd_scan() {
     fi
   done
 
-  # scan for .env files in $HOME
+  # scan for .env files
+  local scan_dirs
+  scan_dirs="$(eval echo "$ENV_SCAN_DIRS")"
   while IFS= read -r envfile; do
+    is_excluded "$envfile" && continue
     add_path "$envfile" ".env file"
-  done < <(fd -t f -H -g '.env' "$HOME" 2>/dev/null || true)
+  done < <(fd -t f -H -g '.env' $scan_dirs 2>/dev/null || true)
 
   # scan for private key files
   while IFS= read -r keyfile; do
@@ -248,6 +346,7 @@ cmd_paths() {
 }
 
 case "${1:-}" in
+  init|setup) cmd_init ;;
   lockdown|lock) cmd_lockdown ;;
   unlock) cmd_unlock ;;
   scan) cmd_scan ;;
