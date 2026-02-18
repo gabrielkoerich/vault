@@ -28,6 +28,18 @@ config:
 EOF
 }
 
+check_deps() {
+  local missing=()
+  for cmd in "$@"; do
+    command -v "$cmd" &>/dev/null || missing+=("$cmd")
+  done
+  if [ ${#missing[@]} -gt 0 ]; then
+    echo "error: missing dependencies: ${missing[*]}" >&2
+    echo "install with: brew install ${missing[*]}" >&2
+    exit 1
+  fi
+}
+
 ensure_config() {
   if [ ! -f "$PATHS_FILE" ]; then
     echo "error: $PATHS_FILE not found" >&2
@@ -61,6 +73,7 @@ read_paths() {
 }
 
 cmd_lockdown() {
+  check_deps age fd
   ensure_config
 
   if [ -f "$VAULT_FILE" ]; then
@@ -82,6 +95,8 @@ cmd_lockdown() {
   printf '%s\n' "${paths[@]}" > "$MANIFEST_FILE"
 
   # tar relative to $HOME and encrypt with passphrase
+  echo ""
+  echo "WARNING: if you lose your passphrase, you will lose access to all locked files."
   echo ""
   echo "enter a passphrase to encrypt the vault:"
   tar -cf - -C "$HOME" "${paths[@]/#$HOME\//}" | age -p -o "$VAULT_FILE"
@@ -117,6 +132,7 @@ cmd_lockdown() {
 }
 
 cmd_unlock() {
+  check_deps age
   if [ ! -f "$VAULT_FILE" ]; then
     echo "error: $VAULT_FILE not found — not locked?" >&2
     exit 1
@@ -130,6 +146,7 @@ cmd_unlock() {
 }
 
 cmd_scan() {
+  check_deps fd rg
   mkdir -p "$CONFIG_DIR"
   touch "$PATHS_FILE"
 

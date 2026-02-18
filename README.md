@@ -2,7 +2,7 @@
 
 Temporarily lock down sensitive files on your machine. One command to encrypt everything, one to bring it back.
 
-```
+```bash
 $ vault lockdown
 locking 12 sensitive path(s):
   ~/.ssh
@@ -23,6 +23,7 @@ unlocked. all sensitive files restored
 
 Sensitive files sitting on disk are an attack surface. Someone or something could:
 - Run a malicious `postinstall` script that exfiltrates keys
+- Clone a repository with a fake dependency which tries to steal your data
 - Glance at your terminal while you `cat` a config file
 - Run `find ~ -name .env` if they get a moment on your machine
 - Exploit a dependency to read `~/.ssh` or `~/.gnupg`
@@ -66,7 +67,7 @@ Vault reads from `~/.config/vault/`:
 
 One sensitive path per line. Supports `$HOME` expansion. Lines starting with `#` are ignored.
 
-```
+```bash
 # SSH keys
 $HOME/.ssh
 
@@ -127,6 +128,8 @@ During `vault lockdown`, any `.env` files found under `$HOME` are included after
 The vault file lives at `~/.vault.tar.age`. A manifest at `~/.vault-manifest` tracks what was locked (useful for `vault status`).
 
 Passphrase encryption means no keys need to exist on disk — the only secret is in your head.
+
+> ⚠️ *If you lose your passphrase, you will lose access to all locked files.*
 
 ## Environment variables
 
