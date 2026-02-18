@@ -1,0 +1,47 @@
+# Vault default scan paths
+# Edit this file to customize what `vault scan` looks for
+# Copy to ~/.config/vault/scan.yml to override defaults
+#
+# Format: YAML list of paths (supports $HOME expansion)
+# Paths that don't exist on your machine are silently skipped
+
+# SSH & GPG keys
+- $HOME/.ssh
+- $HOME/.gnupg
+
+# Cloud & infrastructure
+- $HOME/.aws
+- $HOME/.kube/config
+- $HOME/.terraform.d/credentials.tfrc.json
+- $HOME/.cloudflared
+- $HOME/.config/stripe
+
+# Dev tool tokens
+- $HOME/.npmrc
+- $HOME/.netrc
+- $HOME/.docker/config.json
+- $HOME/.config/gh/hosts.yml
+
+# AI tools
+- $HOME/.codex
+- $HOME/.config/claude
+
+# Databases
+- $HOME/.pgpass
+- $HOME/.my.cnf
+
+# Shell history
+- $HOME/.zsh_history
+- $HOME/.bash_history
+
+# Encryption keys
+- $HOME/.config/age
+
+# Crypto wallets
+- $HOME/.config/solana
+- $HOME/.ethereum
+
+# Private shell config
+- $HOME/.private
+- $HOME/.exports
+- $HOME/.extra

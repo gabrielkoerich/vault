@@ -1,5 +1,5 @@
 class Vault < Formula
-  desc "Lock down sensitive files before screen sharing or interviews"
+  desc "Lock down sensitive files with age encryption"
   homepage "https://github.com/gabrielkoerich/vault"
   url "https://github.com/gabrielkoerich/vault/archive/refs/tags/v0.1.0.tar.gz"
   sha256 ""
@@ -7,20 +7,19 @@ class Vault < Formula
   license "MIT"
 
   depends_on "age"
+  depends_on "fd"
+  depends_on "ripgrep"
 
   def install
     bin.install "vault"
+    pkgshare.install "scan.yml"
   end
 
   def caveats
     <<~EOS
-      Create your config at ~/.config/vault/paths with one sensitive path per line:
+      Run `vault scan` to auto-detect sensitive paths, then `vault lockdown` to encrypt them.
 
-        $HOME/.private
-        $HOME/.ssh
-        $HOME/.config/solana
-
-      Then run `vault scan` to auto-detect more, or `vault lockdown` before a call.
+      Edit ~/.config/vault/scan.yml to customize what gets scanned.
     EOS
   end
 

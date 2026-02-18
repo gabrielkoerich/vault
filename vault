@@ -4,13 +4,14 @@ set -euo pipefail
 VERSION="0.1.0"
 CONFIG_DIR="${VAULT_CONFIG_DIR:-$HOME/.config/vault}"
 PATHS_FILE="$CONFIG_DIR/paths"
-CANDIDATES_FILE="$CONFIG_DIR/scan-candidates"
+SCAN_FILE="$CONFIG_DIR/scan.yml"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VAULT_FILE="${VAULT_FILE:-$HOME/.vault.tar.age}"
 MANIFEST_FILE="${VAULT_FILE%.tar.age}-manifest"
 
 usage() {
   cat <<EOF
-vault $VERSION — lock down sensitive files before screen sharing
+vault $VERSION — lock down sensitive files with age encryption
 
 usage:
   vault lockdown    encrypt and remove sensitive files from disk
@@ -22,7 +23,7 @@ usage:
 
 config:
   $PATHS_FILE           paths to lock (one per line)
-  $CANDIDATES_FILE      paths to scan for secrets
+  $SCAN_FILE            paths to scan for secrets (editable)
 
 EOF
 }
@@ -47,10 +48,14 @@ read_paths() {
     fi
   done < "$PATHS_FILE"
 
-  # collect .env files from ~/Projects
-  while IFS= read -r -d '' envfile; do
-    paths+=("$envfile")
-  done < <(find "$HOME/Projects" -name '.env' -type f -print0 2>/dev/null)
+  # optionally collect .env files from $HOME
+  read -p "scan for .env files under \$HOME? (Y/n) " -n 1 -r
+  echo ""
+  if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+    while IFS= read -r envfile; do
+      paths+=("$envfile")
+    done < <(fd -t f -H -g '.env' "$HOME" 2>/dev/null)
+  fi
 
   printf '%s\n' "${paths[@]}"
 }
@@ -128,12 +133,28 @@ cmd_scan() {
   mkdir -p "$CONFIG_DIR"
   touch "$PATHS_FILE"
 
+  # copy default scan.yml if user doesn't have one
+  if [ ! -f "$SCAN_FILE" ]; then
+    local default_scan="$SCRIPT_DIR/scan.yml"
+    # homebrew installs to share/vault/
+    [ ! -f "$default_scan" ] && default_scan="$(brew --prefix 2>/dev/null)/share/vault/scan.yml"
+    if [ -f "$default_scan" ]; then
+      cp "$default_scan" "$SCAN_FILE"
+      echo "created $SCAN_FILE from defaults"
+      echo "edit it to customize what vault scans for"
+      echo ""
+    else
+      echo "error: no scan.yml found" >&2
+      exit 1
+    fi
+  fi
+
   local found=0
   add_path() {
     local p="$1"
     local label="$2"
     local entry="\$HOME/${p#$HOME/}"
-    if ! grep -qF "$entry" "$PATHS_FILE"; then
+    if ! rg -qF "$entry" "$PATHS_FILE"; then
       echo "$entry" >> "$PATHS_FILE"
       echo "  added: $entry ($label)"
       found=$((found + 1))
@@ -142,35 +163,35 @@ cmd_scan() {
 
   echo "scanning for exposed secrets..."
 
-  # check candidates from config
-  if [ -f "$CANDIDATES_FILE" ]; then
-    while IFS= read -r line; do
-      [[ -z "$line" || "$line" =~ ^# ]] && continue
-      local type="${line%%:*}"
-      local raw="${line#*:}"
-      local p
-      p="$(eval echo "$raw")"
-      case "$type" in
-        f) [ -f "$p" ] && add_path "$p" "candidate" ;;
-        d) [ -d "$p" ] && add_path "$p" "candidate" ;;
-        g) local file="${p%%:*}"; local pattern="${p#*:}"; [ -f "$file" ] && grep -q "$pattern" "$file" 2>/dev/null && add_path "$file" "candidate" ;;
-      esac
-    done < "$CANDIDATES_FILE"
-  fi
+  # check paths from scan.yml
+  while IFS= read -r line; do
+    [[ -z "$line" || "$line" =~ ^# ]] && continue
+    local raw="${line#- }"
+    raw="${raw%%#*}"        # strip inline comments
+    raw="${raw%"${raw##*[![:space:]]}"}"  # trim trailing whitespace
+    local expanded
+    expanded="$(eval echo "$raw")"
+    [ -e "$expanded" ] && add_path "$expanded" "scan.yml"
+  done < "$SCAN_FILE"
 
   # scan shell files for exported secrets
-  for f in "$HOME/.exports" "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.extra" "$HOME/.private"; do
-    if [ -f "$f" ] && grep -qiE '(API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY)=' "$f" 2>/dev/null; then
+  for f in "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.bashrc" "$HOME/.bash_profile"; do
+    if [ -f "$f" ] && rg -qi '(API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY)=' "$f" 2>/dev/null; then
       add_path "$f" "secrets in shell config"
     fi
   done
 
+  # scan for .env files in $HOME
+  while IFS= read -r envfile; do
+    add_path "$envfile" ".env file"
+  done < <(fd -t f -H -g '.env' "$HOME" 2>/dev/null || true)
+
   # scan for private key files
-  while IFS= read -r -d '' keyfile; do
+  while IFS= read -r keyfile; do
     local dir
     dir="$(dirname "$keyfile")"
     add_path "$dir" "private key found"
-  done < <(grep -rlZ --include='*.pem' --include='*.key' --include='*.p12' -e 'PRIVATE KEY' "$HOME/.config" "$HOME/.local" 2>/dev/null || true)
+  done < <(rg -l --glob '*.pem' --glob '*.key' --glob '*.p12' 'PRIVATE KEY' "$HOME/.config" "$HOME/.local" 2>/dev/null || true)
 
   if [ "$found" -eq 0 ]; then
     echo "no new paths found — vault config is up to date"
