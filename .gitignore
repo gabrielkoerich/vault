@@ -1,0 +1,6 @@
+*.agekey
+*.dec
+*.decrypted
+.DS_Store
+.env
+secrets/
