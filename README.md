@@ -1,5 +1,7 @@
 # Vault
 
+[![CI](https://github.com/gabrielkoerich/vault/actions/workflows/release.yml/badge.svg)](https://github.com/gabrielkoerich/vault/actions/workflows/release.yml)
+
 Temporarily lock down sensitive files on your machine. One command to encrypt everything, one to bring it back.
 
 ## Why?
