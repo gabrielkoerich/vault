@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.1.0"
+CONFIG_DIR="${VAULT_CONFIG_DIR:-$HOME/.config/vault}"
+PATHS_FILE="$CONFIG_DIR/paths"
+CANDIDATES_FILE="$CONFIG_DIR/scan-candidates"
+VAULT_FILE="${VAULT_FILE:-$HOME/.vault.tar.age}"
+MANIFEST_FILE="${VAULT_FILE%.tar.age}-manifest"
+
+usage() {
+  cat <<EOF
+vault $VERSION — lock down sensitive files before screen sharing
+
+usage:
+  vault lockdown    encrypt and remove sensitive files from disk
+  vault unlock      restore sensitive files from the encrypted vault
+  vault scan        scan for exposed secrets and update paths config
+  vault status      show whether vault is locked or unlocked
+  vault paths       list configured sensitive paths
+  vault version     show version
+
+config:
+  $PATHS_FILE           paths to lock (one per line)
+  $CANDIDATES_FILE      paths to scan for secrets
+
+EOF
+}
+
+ensure_config() {
+  if [ ! -f "$PATHS_FILE" ]; then
+    echo "error: $PATHS_FILE not found" >&2
+    echo "create it with one sensitive path per line (supports \$HOME)" >&2
+    echo "run 'vault scan' to auto-detect sensitive paths" >&2
+    exit 1
+  fi
+}
+
+read_paths() {
+  local paths=()
+  while IFS= read -r line; do
+    [[ -z "$line" || "$line" =~ ^# ]] && continue
+    local expanded
+    expanded="$(eval echo "$line")"
+    if [ -e "$expanded" ]; then
+      paths+=("$expanded")
+    fi
+  done < "$PATHS_FILE"
+
+  # collect .env files from ~/Projects
+  while IFS= read -r -d '' envfile; do
+    paths+=("$envfile")
+  done < <(find "$HOME/Projects" -name '.env' -type f -print0 2>/dev/null)
+
+  printf '%s\n' "${paths[@]}"
+}
+
+cmd_lockdown() {
+  ensure_config
+
+  if [ -f "$VAULT_FILE" ]; then
+    echo "error: $VAULT_FILE already exists — already locked? run 'vault unlock' first" >&2
+    exit 1
+  fi
+
+  mapfile -t paths < <(read_paths)
+
+  if [ ${#paths[@]} -eq 0 ]; then
+    echo "nothing to lock — no sensitive files found"
+    exit 0
+  fi
+
+  echo "locking ${#paths[@]} sensitive path(s):"
+  printf '  %s\n' "${paths[@]}"
+
+  # save manifest
+  printf '%s\n' "${paths[@]}" > "$MANIFEST_FILE"
+
+  # tar relative to $HOME and encrypt with passphrase
+  echo ""
+  echo "enter a passphrase to encrypt the vault:"
+  tar -cf - -C "$HOME" "${paths[@]/#$HOME\//}" | age -p -o "$VAULT_FILE"
+
+  # verify before removing
+  if [ ! -f "$VAULT_FILE" ]; then
+    echo "error: vault not created, aborting — files are safe" >&2
+    rm -f "$MANIFEST_FILE"
+    exit 1
+  fi
+
+  # remove originals
+  for p in "${paths[@]}"; do
+    if command -v trash &>/dev/null; then
+      trash "$p"
+    else
+      rm -rf "$p"
+    fi
+  done
+
+  echo ""
+  echo "locked. sensitive files encrypted to $VAULT_FILE"
+  echo "run 'vault unlock' to restore"
+  echo ""
+  read -p "empty trash now? (y/n) " -n 1 -r
+  echo ""
+  if [[ $REPLY =~ ^[Yy]$ ]]; then
+    if [[ "$(uname)" == "Darwin" ]]; then
+      osascript -e 'tell application "Finder" to empty the trash'
+    fi
+    echo "trash emptied"
+  fi
+}
+
+cmd_unlock() {
+  if [ ! -f "$VAULT_FILE" ]; then
+    echo "error: $VAULT_FILE not found — not locked?" >&2
+    exit 1
+  fi
+
+  echo "enter your passphrase to decrypt the vault:"
+  age --decrypt -o - "$VAULT_FILE" | tar -xf - -C "$HOME"
+
+  rm -f "$VAULT_FILE" "$MANIFEST_FILE"
+  echo "unlocked. all sensitive files restored"
+}
+
+cmd_scan() {
+  mkdir -p "$CONFIG_DIR"
+  touch "$PATHS_FILE"
+
+  local found=0
+  add_path() {
+    local p="$1"
+    local label="$2"
+    local entry="\$HOME/${p#$HOME/}"
+    if ! grep -qF "$entry" "$PATHS_FILE"; then
+      echo "$entry" >> "$PATHS_FILE"
+      echo "  added: $entry ($label)"
+      found=$((found + 1))
+    fi
+  }
+
+  echo "scanning for exposed secrets..."
+
+  # check candidates from config
+  if [ -f "$CANDIDATES_FILE" ]; then
+    while IFS= read -r line; do
+      [[ -z "$line" || "$line" =~ ^# ]] && continue
+      local type="${line%%:*}"
+      local raw="${line#*:}"
+      local p
+      p="$(eval echo "$raw")"
+      case "$type" in
+        f) [ -f "$p" ] && add_path "$p" "candidate" ;;
+        d) [ -d "$p" ] && add_path "$p" "candidate" ;;
+        g) local file="${p%%:*}"; local pattern="${p#*:}"; [ -f "$file" ] && grep -q "$pattern" "$file" 2>/dev/null && add_path "$file" "candidate" ;;
+      esac
+    done < "$CANDIDATES_FILE"
+  fi
+
+  # scan shell files for exported secrets
+  for f in "$HOME/.exports" "$HOME/.zshrc" "$HOME/.zprofile" "$HOME/.extra" "$HOME/.private"; do
+    if [ -f "$f" ] && grep -qiE '(API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY)=' "$f" 2>/dev/null; then
+      add_path "$f" "secrets in shell config"
+    fi
+  done
+
+  # scan for private key files
+  while IFS= read -r -d '' keyfile; do
+    local dir
+    dir="$(dirname "$keyfile")"
+    add_path "$dir" "private key found"
+  done < <(grep -rlZ --include='*.pem' --include='*.key' --include='*.p12' -e 'PRIVATE KEY' "$HOME/.config" "$HOME/.local" 2>/dev/null || true)
+
+  if [ "$found" -eq 0 ]; then
+    echo "no new paths found — vault config is up to date"
+  else
+    echo ""
+    echo "added $found new path(s) to $PATHS_FILE"
+  fi
+}
+
+cmd_status() {
+  if [ -f "$VAULT_FILE" ]; then
+    echo "locked"
+    if [ -f "$MANIFEST_FILE" ]; then
+      echo ""
+      echo "encrypted paths:"
+      sed 's/^/  /' "$MANIFEST_FILE"
+    fi
+  else
+    echo "unlocked"
+  fi
+}
+
+cmd_paths() {
+  ensure_config
+  echo "configured paths ($PATHS_FILE):"
+  echo ""
+  while IFS= read -r line; do
+    [[ -z "$line" || "$line" =~ ^# ]] && continue
+    local expanded
+    expanded="$(eval echo "$line")"
+    if [ -e "$expanded" ]; then
+      echo "  $line"
+    else
+      echo "  $line (missing)"
+    fi
+  done < "$PATHS_FILE"
+}
+
+case "${1:-}" in
+  lockdown|lock) cmd_lockdown ;;
+  unlock) cmd_unlock ;;
+  scan) cmd_scan ;;
+  status) cmd_status ;;
+  paths) cmd_paths ;;
+  version|-v|--version) echo "vault $VERSION" ;;
+  help|-h|--help|"") usage ;;
+  *) echo "unknown command: $1" >&2; usage; exit 1 ;;
+esac
