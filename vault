@@ -104,7 +104,7 @@ read_paths() {
       is_self "$envfile" && continue
       is_excluded "$envfile" && continue
       paths+=("$envfile")
-    done < <(fd -t f -H -g '.env' "$scan_dirs" 2>/dev/null)
+    done < <(fd -t f -H --no-ignore -g '.env*' "$scan_dirs" 2>/dev/null)
   fi
 
   printf '%s\n' "${paths[@]}"
@@ -313,7 +313,7 @@ cmd_scan() {
   while IFS= read -r envfile; do
     is_excluded "$envfile" && continue
     add_path "$envfile" ".env file"
-  done < <(fd -t f -H -g '.env' "$scan_dirs" 2>/dev/null || true)
+  done < <(fd -t f -H --no-ignore -g '.env*' "$scan_dirs" 2>/dev/null || true)
 
   # scan for private key files
   while IFS= read -r keyfile; do
