@@ -190,8 +190,14 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # update VERSION in the script
+          sed -i "s/^VERSION=\".*\"/VERSION=\"${VERSION#v}\"/" vault
+          git add vault
+          git commit -m "chore: bump version to ${VERSION}"
+
           git tag -a "$VERSION" -m "$VERSION"
-          git push origin "$VERSION"
+          git push origin main "$VERSION"
 
       - name: Create release
         if: steps.check.outputs.skip == 'false'
