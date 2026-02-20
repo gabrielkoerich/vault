@@ -186,12 +186,17 @@ cmd_lockdown() {
   # save manifest
   printf '%s\n' "${paths[@]}" > "$MANIFEST_FILE"
 
-  # tar relative to $HOME and encrypt with passphrase
+  # tar and encrypt with passphrase
+  local tmp_tar
+  tmp_tar="$(mktemp)"
+  trap 'rm -f "$tmp_tar"' EXIT
+  tar -cf "$tmp_tar" -C "$HOME" "${paths[@]/#$HOME\//}" 2> >(grep -v 'socket ignored' >&2)
+
   echo ""
   echo "WARNING: if you lose your passphrase, you will lose access to all locked files."
   echo ""
-  echo "enter a passphrase to encrypt the vault:"
-  tar -cf - -C "$HOME" "${paths[@]/#$HOME\//}" | age -p -o "$VAULT_FILE"
+  age -p -o "$VAULT_FILE" "$tmp_tar"
+  rm -f "$tmp_tar"
 
   # verify before removing
   if [ ! -f "$VAULT_FILE" ]; then
@@ -203,6 +208,7 @@ cmd_lockdown() {
   # remove originals
   load_settings
   for p in "${paths[@]}"; do
+    [ -e "$p" ] || [ -L "$p" ] || continue
     if [[ "$DELETE_METHOD" == "trash" ]] && command -v trash &>/dev/null; then
       trash "$p"
     else
@@ -234,8 +240,12 @@ cmd_unlock() {
     exit 1
   fi
 
-  echo "enter your passphrase to decrypt the vault:"
-  age --decrypt -o - "$VAULT_FILE" | tar -xf - -C "$HOME"
+  local tmp_tar
+  tmp_tar="$(mktemp)"
+  trap 'rm -f "$tmp_tar"' EXIT
+  age --decrypt -o "$tmp_tar" "$VAULT_FILE"
+  tar -xf "$tmp_tar" -C "$HOME"
+  rm -f "$tmp_tar"
 
   rm -f "$VAULT_FILE" "$MANIFEST_FILE"
   echo "unlocked. all sensitive files restored"
