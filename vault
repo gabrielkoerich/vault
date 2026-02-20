@@ -97,8 +97,8 @@ read_paths() {
   # optionally collect .env files
   local scan_dirs
   scan_dirs="$(eval echo "$ENV_SCAN_DIRS")"
-  read -p "scan for .env files under $scan_dirs? (Y/n) " -n 1 -r
-  echo ""
+  read -p "scan for .env files under $scan_dirs? (Y/n) " -n 1 -r < /dev/tty
+  echo "" > /dev/tty
   if [[ ! $REPLY =~ ^[Nn]$ ]]; then
     while IFS= read -r envfile; do
       is_self "$envfile" && continue
@@ -170,7 +170,10 @@ cmd_lockdown() {
     exit 1
   fi
 
-  mapfile -t paths < <(read_paths)
+  paths=()
+  while IFS= read -r line; do
+    paths+=("$line")
+  done < <(read_paths)
 
   if [ ${#paths[@]} -eq 0 ]; then
     echo "nothing to lock — no sensitive files found"
