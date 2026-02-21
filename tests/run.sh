@@ -48,7 +48,7 @@ expect_fail() {
 echo "secret" > "$HOME/secret.txt"
 printf '%s\n' "$HOME/secret.txt" > "$VAULT_CONFIG_DIR/paths"
 
-pubkey="$(age-keygen -o "$tmp/ci.key" | awk '/Public key:/ {print $3}')"
+pubkey="$(age-keygen -o "$tmp/ci.key" 2>&1 | awk '/Public key:/ {print $3}')"
 echo "$pubkey" > "$tmp/recipients.txt"
 
 "$VAULT" lockdown --recipients-file "$tmp/recipients.txt"

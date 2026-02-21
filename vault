@@ -306,7 +306,7 @@ cmd_lockdown() {
   check_deps age fd
   ensure_config
 
-  local recipients=()
+  local -a recipients=()
   local recipients_file=""
   local passphrase=""
   local passphrase_stdin=0
@@ -380,7 +380,7 @@ cmd_lockdown() {
   # tar and encrypt with passphrase
   local tmp_tar
   tmp_tar="$(mktemp)"
-  trap 'rm -f "$tmp_tar"' EXIT
+  trap 'rm -f "$tmp_tar"' RETURN
   tar -cf "$tmp_tar" -C "$HOME" "${paths[@]/#$HOME\//}" 2> >(grep -v 'socket ignored' >&2)
 
   echo ""
@@ -448,7 +448,7 @@ cmd_unlock() {
   local keep_keychain=0
   local passphrase=""
   local passphrase_stdin=0
-  local identity_files=()
+  local -a identity_files=()
   local identity_stdin=0
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
@@ -489,7 +489,7 @@ cmd_unlock() {
 
   local tmp_tar
   tmp_tar="$(mktemp)"
-  trap 'rm -f "$tmp_tar"' EXIT
+  trap 'rm -f "$tmp_tar"' RETURN
   local identity_tmp=""
   if [ -z "${VAULT_IDENTITY_FILE:-}" ] || [ ${#identity_files[@]} -gt 0 ] || [ "$identity_stdin" -eq 1 ]; then
     : # identity_files already set
@@ -545,7 +545,7 @@ cmd_create() {
 
   local passphrase=""
   local passphrase_stdin=0
-  local recipients=()
+  local -a recipients=()
   local recipients_file=""
   local generate_pass=0
   while [[ "${1:-}" == --* ]]; do
@@ -633,7 +633,7 @@ cmd_create() {
 
   local tmp_tar
   tmp_tar="$(mktemp)"
-  trap 'rm -f "$tmp_tar"' EXIT
+  trap 'rm -f "$tmp_tar"' RETURN
   tar -cf "$tmp_tar" -P "${paths[@]}" 2> >(grep -v 'socket ignored' >&2)
 
   echo ""
@@ -701,7 +701,7 @@ cmd_open() {
   local passphrase=""
   local passphrase_stdin=0
   local keep_keychain=0
-  local identity_files=()
+  local -a identity_files=()
   local identity_stdin=0
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
@@ -755,7 +755,7 @@ cmd_open() {
 
   local tmp_tar
   tmp_tar="$(mktemp)"
-  trap 'rm -f "$tmp_tar"' EXIT
+  trap 'rm -f "$tmp_tar"' RETURN
 
   local identity_tmp=""
   if [ -z "${VAULT_IDENTITY_FILE:-}" ] || [ ${#identity_files[@]} -gt 0 ] || [ "$identity_stdin" -eq 1 ]; then
