@@ -70,13 +70,15 @@ test ! -e "$HOME/named.txt"
 test -f "$HOME/named.txt"
 grep -q "named" "$HOME/named.txt"
 
-echo "gen" > "$HOME/gen.txt"
-"$VAULT" create gen --generate-pass "$HOME/gen.txt"
-test -f "$VAULTS_DIR/gen.tar.age"
-test ! -e "$HOME/gen.txt"
-"$VAULT" open gen
-test -f "$HOME/gen.txt"
-grep -q "gen" "$HOME/gen.txt"
+if [ "$(uname)" = "Darwin" ] && command -v security >/dev/null 2>&1; then
+  echo "gen" > "$HOME/gen.txt"
+  "$VAULT" create gen --generate-pass "$HOME/gen.txt"
+  test -f "$VAULTS_DIR/gen.tar.age"
+  test ! -e "$HOME/gen.txt"
+  "$VAULT" open gen
+  test -f "$HOME/gen.txt"
+  grep -q "gen" "$HOME/gen.txt"
+fi
 
 pubkey="$(age-keygen -o "$tmp/ci.key" | awk '/Public key:/ {print $3}')"
 echo "$pubkey" > "$tmp/recipients.txt"
