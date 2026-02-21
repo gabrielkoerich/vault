@@ -9,6 +9,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SETTINGS_FILE="$CONFIG_DIR/settings"
 VAULT_FILE="${VAULT_FILE:-$HOME/.vault.tar.age}"
 MANIFEST_FILE="${VAULT_FILE%.tar.age}-manifest"
+VAULTS_DIR="${VAULTS_DIR:-$HOME/.vaults}"
+KEYCHAIN_PREFIX="${KEYCHAIN_PREFIX:-gabrielkoerich/vault}"
+KEYCHAIN_DELETE_CONFIRM="${KEYCHAIN_DELETE_CONFIRM:-yes}"
 
 load_settings() {
   # shellcheck source=/dev/null
@@ -37,6 +40,8 @@ usage:
   vault init        setup config and scan for sensitive files
   vault lockdown    encrypt and remove sensitive files from disk
   vault unlock      restore sensitive files from the encrypted vault
+  vault create      create a named vault from explicit paths
+  vault open        decrypt a named vault
   vault scan        scan for exposed secrets and update paths config
   vault status      show whether vault is locked or unlocked
   vault paths       list configured sensitive paths
@@ -69,10 +74,126 @@ ensure_config() {
   fi
 }
 
+keychain_service_for() {
+  local name="${1:-default}"
+  echo "${KEYCHAIN_PREFIX}:${name}"
+}
+
+is_darwin() {
+  [[ "$(uname)" == "Darwin" ]]
+}
+
+keychain_get() {
+  local name="${1:-default}"
+  is_darwin || return 1
+  local service
+  service="$(keychain_service_for "$name")"
+  security find-generic-password -a "$USER" -s "$service" -w 2>/dev/null
+}
+
+keychain_set() {
+  local name="${1:-default}"
+  local passphrase="$2"
+  is_darwin || return 1
+  local service
+  service="$(keychain_service_for "$name")"
+  security add-generic-password -a "$USER" -s "$service" -w "$passphrase" -U >/dev/null
+}
+
+keychain_delete() {
+  local name="${1:-default}"
+  is_darwin || return 1
+  local service
+  service="$(keychain_service_for "$name")"
+  if security find-generic-password -a "$USER" -s "$service" >/dev/null 2>&1; then
+    if [[ "$KEYCHAIN_DELETE_CONFIRM" == "yes" ]]; then
+      read -p "delete keychain entry '$service'? (y/N) " -n 1 -r < /dev/tty
+      echo "" > /dev/tty
+      [[ ! $REPLY =~ ^[Yy]$ ]] && return 0
+    fi
+    security delete-generic-password -a "$USER" -s "$service" >/dev/null
+  fi
+}
+
+read_passphrase() {
+  local name="${1:-default}"
+  local passphrase="$2"
+  local passphrase_stdin="$3"
+
+  if [ "$passphrase_stdin" -eq 1 ]; then
+    passphrase="$(cat)"
+  fi
+
+  if [ -z "$passphrase" ]; then
+    passphrase="$(keychain_get "$name" || true)"
+  fi
+
+  printf '%s' "$passphrase"
+}
+
+prompt_passphrase_create() {
+  local name="${1:-default}"
+  local passphrase=""
+  local confirm=""
+
+  echo ""
+  echo "no passphrase found in keychain for '$(keychain_service_for "$name")'"
+  echo "enter a new passphrase (will be saved to keychain)"
+  echo ""
+  read -s -p "passphrase: " passphrase < /dev/tty
+  echo "" > /dev/tty
+  read -s -p "confirm passphrase: " confirm < /dev/tty
+  echo "" > /dev/tty
+
+  if [ -z "$passphrase" ] || [ "$passphrase" != "$confirm" ]; then
+    echo "error: passphrases do not match" >&2
+    exit 1
+  fi
+
+  printf '%s' "$passphrase"
+}
+
+prompt_passphrase_open() {
+  local name="${1:-default}"
+  local passphrase=""
+  echo ""
+  echo "no passphrase found in keychain for '$(keychain_service_for "$name")'"
+  echo "enter the passphrase to decrypt"
+  echo ""
+  read -s -p "passphrase: " passphrase < /dev/tty
+  echo "" > /dev/tty
+  printf '%s' "$passphrase"
+}
+
+ensure_passphrase_create() {
+  local name="${1:-default}"
+  local passphrase="$2"
+  local passphrase_stdin="$3"
+
+  passphrase="$(read_passphrase "$name" "$passphrase" "$passphrase_stdin")"
+  if [ -z "$passphrase" ]; then
+    passphrase="$(prompt_passphrase_create "$name")"
+  fi
+  printf '%s' "$passphrase"
+}
+
+ensure_passphrase_open() {
+  local name="${1:-default}"
+  local passphrase="$2"
+  local passphrase_stdin="$3"
+
+  passphrase="$(read_passphrase "$name" "$passphrase" "$passphrase_stdin")"
+  if [ -z "$passphrase" ]; then
+    passphrase="$(prompt_passphrase_open "$name")"
+  fi
+  printf '%s' "$passphrase"
+}
+
 is_self() {
   local p="$1"
   # skip vault's own config, the vault file, and the vault script
   [[ "$p" == "$CONFIG_DIR" || "$p" == "$CONFIG_DIR/"* ]] && return 0
+  [[ "$p" == "$VAULTS_DIR" || "$p" == "$VAULTS_DIR/"* ]] && return 0
   [[ "$p" == "$VAULT_FILE" || "$p" == "$MANIFEST_FILE" ]] && return 0
   [[ "$p" == "$(command -v vault 2>/dev/null)" ]] && return 0
   return 1
@@ -195,7 +316,10 @@ cmd_lockdown() {
   echo ""
   echo "WARNING: if you lose your passphrase, you will lose access to all locked files."
   echo ""
-  age -p -o "$VAULT_FILE" "$tmp_tar"
+  local passphrase=""
+  passphrase="$(ensure_passphrase_create "default" "" 0)"
+  AGE_PASSPHRASE="$passphrase" age -p -o "$VAULT_FILE" "$tmp_tar"
+  keychain_set "default" "$passphrase" || true
   rm -f "$tmp_tar"
 
   # verify before removing
@@ -235,6 +359,23 @@ cmd_lockdown() {
 
 cmd_unlock() {
   check_deps age
+  local keep_keychain=0
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --keep-keychain)
+        keep_keychain=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "unknown option: $1" >&2
+        exit 1
+        ;;
+    esac
+  done
   if [ ! -f "$VAULT_FILE" ]; then
     echo "error: $VAULT_FILE not found — not locked?" >&2
     exit 1
@@ -243,12 +384,192 @@ cmd_unlock() {
   local tmp_tar
   tmp_tar="$(mktemp)"
   trap 'rm -f "$tmp_tar"' EXIT
-  age --decrypt -o "$tmp_tar" "$VAULT_FILE"
+  local passphrase=""
+  passphrase="$(ensure_passphrase_open "default" "" 0)"
+  AGE_PASSPHRASE="$passphrase" age --decrypt -o "$tmp_tar" "$VAULT_FILE"
   tar -xf "$tmp_tar" -C "$HOME"
   rm -f "$tmp_tar"
 
   rm -f "$VAULT_FILE" "$MANIFEST_FILE"
+  if [ "$keep_keychain" -eq 0 ]; then
+    keychain_delete "default" || true
+  fi
   echo "unlocked. all sensitive files restored"
+}
+
+cmd_create() {
+  check_deps age
+
+  local passphrase=""
+  local passphrase_stdin=0
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --passphrase)
+        passphrase="${2:-}"
+        shift 2
+        ;;
+      --passphrase-stdin)
+        passphrase_stdin=1
+        shift
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "unknown option: $1" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  local name="${1:-}"
+  shift || true
+
+  if [ -z "$name" ]; then
+    echo "error: vault name is required" >&2
+    exit 1
+  fi
+
+  if [ $# -eq 0 ]; then
+    echo "error: provide at least one path to lock" >&2
+    exit 1
+  fi
+
+  mkdir -p "$VAULTS_DIR"
+  local vault_file="$VAULTS_DIR/$name.tar.age"
+  local manifest_file="$VAULTS_DIR/$name-manifest"
+
+  if [ -f "$vault_file" ]; then
+    echo "error: $vault_file already exists — already locked? run 'vault open $name' first" >&2
+    exit 1
+  fi
+
+  local paths=()
+  for raw in "$@"; do
+    local expanded
+    expanded="$(eval echo "$raw")"
+    if [ ! -e "$expanded" ]; then
+      echo "error: path not found: $raw" >&2
+      exit 1
+    fi
+    if is_self "$expanded"; then
+      echo "error: $raw points to vault's own files — choose another path" >&2
+      exit 1
+    fi
+    # absolutize
+    if [[ "$expanded" != /* ]]; then
+      expanded="$(cd "$(dirname "$expanded")" && pwd)/$(basename "$expanded")"
+    fi
+    paths+=("$expanded")
+  done
+
+  echo "locking ${#paths[@]} path(s) to named vault '$name':"
+  printf '  %s\n' "${paths[@]}"
+
+  printf '%s\n' "${paths[@]}" > "$manifest_file"
+
+  local tmp_tar
+  tmp_tar="$(mktemp)"
+  trap 'rm -f "$tmp_tar"' EXIT
+  tar -cf "$tmp_tar" -P "${paths[@]}" 2> >(grep -v 'socket ignored' >&2)
+
+  echo ""
+  echo "WARNING: if you lose your passphrase, you will lose access to this vault."
+  echo ""
+
+  passphrase="$(ensure_passphrase_create "$name" "$passphrase" "$passphrase_stdin")"
+  AGE_PASSPHRASE="$passphrase" age -p -o "$vault_file" "$tmp_tar"
+  keychain_set "$name" "$passphrase" || true
+  rm -f "$tmp_tar"
+
+  if [ ! -f "$vault_file" ]; then
+    echo "error: vault not created, aborting — files are safe" >&2
+    rm -f "$manifest_file"
+    exit 1
+  fi
+
+  load_settings
+  for p in "${paths[@]}"; do
+    [ -e "$p" ] || [ -L "$p" ] || continue
+    if [[ "$DELETE_METHOD" == "trash" ]] && command -v trash &>/dev/null; then
+      trash "$p"
+    else
+      rm -rf "$p"
+    fi
+  done
+
+  echo ""
+  echo "locked. named vault saved to $vault_file"
+  echo "run 'vault open $name' to restore"
+}
+
+cmd_open() {
+  check_deps age
+
+  local passphrase=""
+  local passphrase_stdin=0
+  local keep_keychain=0
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --keep-keychain)
+        keep_keychain=1
+        shift
+        ;;
+      --passphrase)
+        passphrase="${2:-}"
+        shift 2
+        ;;
+      --passphrase-stdin)
+        passphrase_stdin=1
+        shift
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "unknown option: $1" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  local name="${1:-}"
+  if [ -z "$name" ]; then
+    echo "error: vault name is required" >&2
+    exit 1
+  fi
+
+  local vault_file="$VAULTS_DIR/$name.tar.age"
+  local manifest_file="$VAULTS_DIR/$name-manifest"
+  if [ ! -f "$vault_file" ]; then
+    echo "error: $vault_file not found — not locked?" >&2
+    exit 1
+  fi
+
+  local tmp_tar
+  tmp_tar="$(mktemp)"
+  trap 'rm -f "$tmp_tar"' EXIT
+
+  passphrase="$(ensure_passphrase_open "$name" "$passphrase" "$passphrase_stdin")"
+  AGE_PASSPHRASE="$passphrase" age --decrypt -o "$tmp_tar" "$vault_file"
+  tar -xf "$tmp_tar" -P
+  rm -f "$tmp_tar"
+
+  rm -f "$vault_file" "$manifest_file"
+  if [ "$keep_keychain" -eq 0 ]; then
+    keychain_delete "$name" || true
+  fi
+  echo "unlocked. named vault '$name' restored"
 }
 
 cmd_scan() {
@@ -363,6 +684,8 @@ case "${1:-}" in
   init|setup) cmd_init ;;
   lockdown|lock) cmd_lockdown ;;
   unlock) cmd_unlock ;;
+  create) shift; cmd_create "$@" ;;
+  open) shift; cmd_open "$@" ;;
   scan) cmd_scan ;;
   status) cmd_status ;;
   paths) cmd_paths ;;
