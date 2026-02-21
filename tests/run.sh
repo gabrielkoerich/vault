@@ -16,6 +16,7 @@ export VAULT_FILE="$tmp/vault.tar.age"
 export VAULTS_DIR="$tmp/vaults"
 export KEYCHAIN_PREFIX="gabrielkoerich/vault-test-$RANDOM"
 export KEYCHAIN_DELETE_CONFIRM="no"
+export VAULT_NO_ENV_SCAN="1"
 
 mkdir -p "$HOME" "$VAULT_CONFIG_DIR"
 printf 'DELETE_METHOD=rm\nENV_SCAN_DIRS=%s\nEXCLUDE_PATHS=\n' "$HOME" > "$VAULT_CONFIG_DIR/settings"
@@ -80,6 +81,14 @@ test ! -e "$HOME/named.txt"
 "$VAULT" open named --passphrase "pass2" --keep-keychain
 test -f "$HOME/named.txt"
 grep -q "named" "$HOME/named.txt"
+
+echo "gen" > "$HOME/gen.txt"
+"$VAULT" create gen --generate-pass "$HOME/gen.txt"
+test -f "$VAULTS_DIR/gen.tar.age"
+test ! -e "$HOME/gen.txt"
+"$VAULT" open gen
+test -f "$HOME/gen.txt"
+grep -q "gen" "$HOME/gen.txt"
 
 pubkey="$(age-keygen -o "$tmp/ci.key" | awk '/Public key:/ {print $3}')"
 echo "$pubkey" > "$tmp/recipients.txt"

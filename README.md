@@ -148,6 +148,7 @@ During `vault lockdown`, any `.env` files found under `$HOME` are included after
 | `KEYCHAIN_DELETE_CONFIRM` | `yes` | prompt before deleting Keychain entries |
 | `VAULT_RECIPIENTS_FILE` | (unset) | age recipients file (recipient mode) |
 | `VAULT_IDENTITY_FILE` | (unset) | age identity file (recipient mode) |
+| `VAULT_NO_ENV_SCAN` | `0` | skip `.env` scan prompt during lockdown |
 
 ## Keychain (default)
 
@@ -243,6 +244,15 @@ For non-interactive use, you can pass the passphrase via stdin (still saved to K
 ```bash
 printf '%s' "$VAULT_PASSPHRASE" | vault create solana --passphrase-stdin ~/.config/solana
 printf '%s' "$VAULT_PASSPHRASE" | vault open solana --passphrase-stdin
+```
+
+`--pass` is a short alias for `--passphrase`.
+
+You can auto‑generate a passphrase (works with `lockdown` and `create`):
+
+```bash
+vault create secrets --generate-pass ~/.config/secrets
+vault lockdown --generate-pass
 ```
 
 ## Install Without Homebrew

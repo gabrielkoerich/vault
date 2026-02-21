@@ -19,6 +19,7 @@ load_settings() {
   DELETE_METHOD="${DELETE_METHOD:-trash}"
   ENV_SCAN_DIRS="${ENV_SCAN_DIRS:-$HOME}"
   EXCLUDE_PATHS="${EXCLUDE_PATHS:-}"
+  VAULT_NO_ENV_SCAN="${VAULT_NO_ENV_SCAN:-0}"
 }
 
 is_excluded() {
@@ -66,6 +67,21 @@ check_deps() {
   fi
 }
 
+generate_passphrase() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -base64 32 | tr -d '\n'
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - <<'PY'
+import secrets, base64
+print(base64.b64encode(secrets.token_bytes(32)).decode().strip())
+PY
+    return 0
+  fi
+  echo "error: cannot generate passphrase (missing openssl or python3)" >&2
+  exit 1
+}
 ensure_config() {
   if [ ! -f "$PATHS_FILE" ]; then
     echo "error: vault is not set up yet" >&2
@@ -218,14 +234,18 @@ read_paths() {
   # optionally collect .env files
   local scan_dirs
   scan_dirs="$(eval echo "$ENV_SCAN_DIRS")"
-  read -p "scan for .env files under $scan_dirs? (Y/n) " -n 1 -r < /dev/tty
-  echo "" > /dev/tty
-  if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-    while IFS= read -r envfile; do
-      is_self "$envfile" && continue
-      is_excluded "$envfile" && continue
-      paths+=("$envfile")
-    done < <(fd -t f -H --no-ignore -g '.env*' "$scan_dirs" 2>/dev/null)
+  if [ "$VAULT_NO_ENV_SCAN" -eq 1 ]; then
+    :
+  else
+    read -p "scan for .env files under $scan_dirs? (Y/n) " -n 1 -r < /dev/tty
+    echo "" > /dev/tty
+    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+      while IFS= read -r envfile; do
+        is_self "$envfile" && continue
+        is_excluded "$envfile" && continue
+        paths+=("$envfile")
+      done < <(fd -t f -H --no-ignore -g '.env*' "$scan_dirs" 2>/dev/null)
+    fi
   fi
 
   printf '%s\n' "${paths[@]}"
@@ -290,6 +310,7 @@ cmd_lockdown() {
   local recipients_file=""
   local passphrase=""
   local passphrase_stdin=0
+  local generate_pass=0
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
       --recipient)
@@ -300,12 +321,16 @@ cmd_lockdown() {
         recipients_file="${2:-}"
         shift 2
         ;;
-      --passphrase)
+      --passphrase|--pass)
         passphrase="${2:-}"
         shift 2
         ;;
       --passphrase-stdin)
         passphrase_stdin=1
+        shift
+        ;;
+      --generate-pass)
+        generate_pass=1
         shift
         ;;
       -h|--help)
@@ -326,7 +351,7 @@ cmd_lockdown() {
     echo "error: recipients file not found: $recipients_file" >&2
     exit 1
   fi
-  if { [ ${#recipients[@]} -gt 0 ] || [ -n "$recipients_file" ]; } && { [ -n "$passphrase" ] || [ "$passphrase_stdin" -eq 1 ]; }; then
+  if { [ ${#recipients[@]} -gt 0 ] || [ -n "$recipients_file" ]; } && { [ -n "$passphrase" ] || [ "$passphrase_stdin" -eq 1 ] || [ "$generate_pass" -eq 1 ]; }; then
     echo "error: cannot use passphrase options with recipient mode" >&2
     exit 1
   fi
@@ -371,7 +396,11 @@ cmd_lockdown() {
     done
     age -o "$VAULT_FILE" "${age_args[@]}" "$tmp_tar"
   else
-    passphrase="$(ensure_passphrase_create "default" "$passphrase" "$passphrase_stdin")"
+    if [ "$generate_pass" -eq 1 ]; then
+      passphrase="$(generate_passphrase)"
+    else
+      passphrase="$(ensure_passphrase_create "default" "$passphrase" "$passphrase_stdin")"
+    fi
     AGE_PASSPHRASE="$passphrase" age -p -o "$VAULT_FILE" "$tmp_tar"
     keychain_set "default" "$passphrase" || true
   fi
@@ -425,7 +454,7 @@ cmd_unlock() {
         keep_keychain=1
         shift
         ;;
-      --passphrase)
+      --passphrase|--pass)
         passphrase="${2:-}"
         shift 2
         ;;
@@ -514,6 +543,7 @@ cmd_create() {
   local passphrase_stdin=0
   local recipients=()
   local recipients_file=""
+  local generate_pass=0
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
       --recipient)
@@ -524,12 +554,16 @@ cmd_create() {
         recipients_file="${2:-}"
         shift 2
         ;;
-      --passphrase)
+      --passphrase|--pass)
         passphrase="${2:-}"
         shift 2
         ;;
       --passphrase-stdin)
         passphrase_stdin=1
+        shift
+        ;;
+      --generate-pass)
+        generate_pass=1
         shift
         ;;
       --)
@@ -609,7 +643,7 @@ cmd_create() {
     echo "error: recipients file not found: $recipients_file" >&2
     exit 1
   fi
-  if { [ ${#recipients[@]} -gt 0 ] || [ -n "$recipients_file" ]; } && { [ -n "$passphrase" ] || [ "$passphrase_stdin" -eq 1 ]; }; then
+  if { [ ${#recipients[@]} -gt 0 ] || [ -n "$recipients_file" ]; } && { [ -n "$passphrase" ] || [ "$passphrase_stdin" -eq 1 ] || [ "$generate_pass" -eq 1 ]; }; then
     echo "error: cannot use passphrase options with recipient mode" >&2
     exit 1
   fi
@@ -624,7 +658,11 @@ cmd_create() {
     done
     age -o "$vault_file" "${age_args[@]}" "$tmp_tar"
   else
-    passphrase="$(ensure_passphrase_create "$name" "$passphrase" "$passphrase_stdin")"
+    if [ "$generate_pass" -eq 1 ]; then
+      passphrase="$(generate_passphrase)"
+    else
+      passphrase="$(ensure_passphrase_create "$name" "$passphrase" "$passphrase_stdin")"
+    fi
     AGE_PASSPHRASE="$passphrase" age -p -o "$vault_file" "$tmp_tar"
     keychain_set "$name" "$passphrase" || true
   fi
@@ -673,7 +711,7 @@ cmd_open() {
         identity_stdin=1
         shift
         ;;
-      --passphrase)
+      --passphrase|--pass)
         passphrase="${2:-}"
         shift 2
         ;;
