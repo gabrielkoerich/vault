@@ -43,12 +43,24 @@ expect_fail() {
   fi
 }
 
+run_with_tty_input() {
+  local input="$1"
+  shift
+  if [ "$(uname)" = "Darwin" ]; then
+    printf '%s' "$input" | script -q /dev/null "$@"
+  else
+    local cmd
+    cmd="$(printf '%q ' "$@")"
+    printf '%s' "$input" | script -q -c "$cmd" /dev/null
+  fi
+}
+
 passphrase="testpass-123"
 
 echo "secret" > "$HOME/secret.txt"
 printf '%s\n' "$HOME/secret.txt" > "$VAULT_CONFIG_DIR/paths"
 
-printf 'n\n' | script -q /dev/null "$VAULT" lockdown --passphrase "$passphrase"
+run_with_tty_input "n\n" "$VAULT" lockdown --passphrase "$passphrase"
 test -f "$VAULT_FILE"
 test ! -e "$HOME/secret.txt"
 
