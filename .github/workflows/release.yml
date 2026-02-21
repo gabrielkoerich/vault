@@ -47,6 +47,11 @@ jobs:
           ./vault version
           ./vault help
 
+      - name: Run tests
+        run: |
+          chmod +x tests/run.sh
+          ./tests/run.sh
+
   release:
     needs: [lint, gitleaks, test]
     if: github.ref == 'refs/heads/main'
