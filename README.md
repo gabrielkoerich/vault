@@ -56,13 +56,15 @@ unlocked. all sensitive files restored
 ## Usage
 
 ```bash
-vault init         # setup config and scan for sensitive files
-vault lockdown     # encrypt and remove sensitive files
-vault unlock       # restore from encrypted vault
-vault scan         # re-scan and update paths
-vault status       # show locked/unlocked state
-vault paths        # list configured paths
-vault version      # show version
+vault init                    # setup config and scan for sensitive files
+vault lockdown                # encrypt and remove sensitive files
+vault unlock [--keep-keychain]  # restore from encrypted vault
+vault create <name> <paths>   # create a named vault from explicit paths
+vault open <name> [--keep-keychain] # restore a named vault
+vault scan                    # re-scan and update paths
+vault status                  # show locked/unlocked state
+vault paths                   # list configured paths
+vault version                 # show version
 ```
 
 ### Dependencies
@@ -141,6 +143,33 @@ During `vault lockdown`, any `.env` files found under `$HOME` are included after
 |----------|---------|-------------|
 | `VAULT_CONFIG_DIR` | `~/.config/vault` | Config directory |
 | `VAULT_FILE` | `~/.vault.tar.age` | Encrypted vault path |
+| `VAULTS_DIR` | `~/.vaults` | Directory for named vault files |
+| `KEYCHAIN_PREFIX` | `gabrielkoerich/vault` | macOS Keychain service prefix |
+| `KEYCHAIN_DELETE_CONFIRM` | `yes` | prompt before deleting Keychain entries |
+
+## Keychain (default)
+
+On macOS, Vault stores passphrases in Keychain by default and retrieves them on `lockdown/open`. If no entry exists, Vault prompts you and saves it.
+
+Keychain entries are deleted after a vault is opened, with a confirmation prompt to avoid stale secrets.
+
+Use `--keep-keychain` on `unlock`/`open` to skip deletion.
+
+## Named vaults
+
+Create one-off vaults without touching the global config:
+
+```bash
+vault create solana ~/.config/solana ~/.config/solana/id.json
+vault open solana
+```
+
+For non-interactive use, you can pass the passphrase via stdin (still saved to Keychain on macOS):
+
+```bash
+printf '%s' "$VAULT_PASSPHRASE" | vault create solana --passphrase-stdin ~/.config/solana
+printf '%s' "$VAULT_PASSPHRASE" | vault open solana --passphrase-stdin
+```
 
 ## Ideas/Roadmap
 
