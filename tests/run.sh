@@ -18,6 +18,7 @@ export KEYCHAIN_PREFIX="gabrielkoerich/vault-test-$RANDOM"
 export KEYCHAIN_DELETE_CONFIRM="no"
 
 mkdir -p "$HOME" "$VAULT_CONFIG_DIR"
+printf 'DELETE_METHOD=rm\nENV_SCAN_DIRS=%s\nEXCLUDE_PATHS=\n' "$HOME" > "$VAULT_CONFIG_DIR/settings"
 
 case "$HOME" in
   "$tmp"/*) : ;;
