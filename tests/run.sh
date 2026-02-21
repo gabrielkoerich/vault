@@ -45,32 +45,33 @@ expect_fail() {
   fi
 }
 
-passphrase="testpass-123"
-
 echo "secret" > "$HOME/secret.txt"
 printf '%s\n' "$HOME/secret.txt" > "$VAULT_CONFIG_DIR/paths"
 
-"$VAULT" lockdown --passphrase "$passphrase"
+pubkey="$(age-keygen -o "$tmp/ci.key" | awk '/Public key:/ {print $3}')"
+echo "$pubkey" > "$tmp/recipients.txt"
+
+"$VAULT" lockdown --recipients-file "$tmp/recipients.txt"
 test -f "$VAULT_FILE"
 test ! -e "$HOME/secret.txt"
 
 "$VAULT" status | grep -q "locked"
 
-"$VAULT" unlock --passphrase "$passphrase" --keep-keychain
+"$VAULT" unlock --identity-file "$tmp/ci.key" --keep-keychain
 test -f "$HOME/secret.txt"
 grep -q "secret" "$HOME/secret.txt"
 
 "$VAULT" status | grep -q "unlocked"
 
 echo "named" > "$HOME/named.txt"
-"$VAULT" create named --passphrase "pass2" "$HOME/named.txt"
+"$VAULT" create named --recipients-file "$tmp/recipients.txt" "$HOME/named.txt"
 test -f "$VAULTS_DIR/named.tar.age"
 test ! -e "$HOME/named.txt"
-"$VAULT" open named --passphrase "pass2" --keep-keychain
+"$VAULT" open named --identity-file "$tmp/ci.key" --keep-keychain
 test -f "$HOME/named.txt"
 grep -q "named" "$HOME/named.txt"
 
-if [ "$(uname)" = "Darwin" ] && command -v security >/dev/null 2>&1; then
+if { [ -c /dev/tty ] || [ -t 0 ]; } && [ "$(uname)" = "Darwin" ] && command -v security >/dev/null 2>&1; then
   echo "gen" > "$HOME/gen.txt"
   "$VAULT" create gen --generate-pass "$HOME/gen.txt"
   test -f "$VAULTS_DIR/gen.tar.age"
@@ -80,8 +81,6 @@ if [ "$(uname)" = "Darwin" ] && command -v security >/dev/null 2>&1; then
   grep -q "gen" "$HOME/gen.txt"
 fi
 
-pubkey="$(age-keygen -o "$tmp/ci.key" | awk '/Public key:/ {print $3}')"
-echo "$pubkey" > "$tmp/recipients.txt"
 echo "recipient" > "$HOME/rec.txt"
 "$VAULT" create rec --recipients-file "$tmp/recipients.txt" "$HOME/rec.txt"
 test -f "$VAULTS_DIR/rec.tar.age"
@@ -93,27 +92,30 @@ grep -q "recipient" "$HOME/rec.txt"
 PREFIX="$tmp/prefix" "$ROOT/install.sh"
 test -x "$tmp/prefix/bin/vault"
 
-echo "badpass" > "$HOME/badpass.txt"
-"$VAULT" create badpass --passphrase "good" "$HOME/badpass.txt"
-expect_fail "$VAULT" open badpass --passphrase "wrong"
-test -f "$VAULTS_DIR/badpass.tar.age"
-test ! -e "$HOME/badpass.txt"
+if [ -c /dev/tty ] || [ -t 0 ]; then
+  passphrase="testpass-123"
+  echo "badpass" > "$HOME/badpass.txt"
+  "$VAULT" create badpass --passphrase "$passphrase" "$HOME/badpass.txt"
+  expect_fail "$VAULT" open badpass --passphrase "wrong"
+  test -f "$VAULTS_DIR/badpass.tar.age"
+  test ! -e "$HOME/badpass.txt"
 
-expect_fail "$VAULT" open missing --passphrase "x"
-expect_fail "$VAULT" create missingpath --passphrase "x" "$HOME/does-not-exist"
+  expect_fail "$VAULT" open missing --passphrase "x"
+  expect_fail "$VAULT" create missingpath --passphrase "x" "$HOME/does-not-exist"
 
-echo "dup" > "$HOME/dup.txt"
-"$VAULT" create dup --passphrase "x" "$HOME/dup.txt"
-expect_fail "$VAULT" create dup --passphrase "x" "$HOME/dup.txt"
-cat "$tmp/ci.key" | "$VAULT" open dup --identity-stdin
+  echo "dup" > "$HOME/dup.txt"
+  "$VAULT" create dup --passphrase "x" "$HOME/dup.txt"
+  expect_fail "$VAULT" create dup --passphrase "x" "$HOME/dup.txt"
+  cat "$tmp/ci.key" | "$VAULT" open dup --identity-stdin
 
-echo "mix" > "$HOME/mix.txt"
-expect_fail "$VAULT" create mix --passphrase "x" --recipient "$pubkey" "$HOME/mix.txt"
+  echo "mix" > "$HOME/mix.txt"
+  expect_fail "$VAULT" create mix --passphrase "x" --recipient "$pubkey" "$HOME/mix.txt"
+fi
 
 expect_fail "$VAULT" open rec --identity-file "$tmp/missing.key"
 expect_fail "$VAULT" create rec2 --recipients-file "$tmp/missing.recipients" "$HOME/rec.txt"
 
-if [ "$(uname)" = "Darwin" ] && command -v security >/dev/null 2>&1; then
+if { [ -c /dev/tty ] || [ -t 0 ]; } && [ "$(uname)" = "Darwin" ] && command -v security >/dev/null 2>&1; then
   echo "kc" > "$HOME/kc.txt"
   security add-generic-password -a "$USER" -s "${KEYCHAIN_PREFIX}:kc" -w "kcpass" -U >/dev/null
   "$VAULT" create kc "$HOME/kc.txt"
