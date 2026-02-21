@@ -682,8 +682,8 @@ cmd_paths() {
 
 case "${1:-}" in
   init|setup) cmd_init ;;
-  lockdown|lock) cmd_lockdown ;;
-  unlock) cmd_unlock ;;
+  lockdown|lock) shift; cmd_lockdown "$@" ;;
+  unlock) cmd_unlock "$@" ;;
   create) shift; cmd_create "$@" ;;
   open) shift; cmd_open "$@" ;;
   scan) cmd_scan ;;
