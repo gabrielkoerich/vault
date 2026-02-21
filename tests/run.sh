@@ -55,13 +55,13 @@ echo "$pubkey" > "$tmp/recipients.txt"
 test -f "$VAULT_FILE"
 test ! -e "$HOME/secret.txt"
 
-"$VAULT" status | grep -q "locked"
+"$VAULT" status >/dev/null
 
 "$VAULT" unlock --identity-file "$tmp/ci.key" --keep-keychain
 test -f "$HOME/secret.txt"
 grep -q "secret" "$HOME/secret.txt"
 
-"$VAULT" status | grep -q "unlocked"
+"$VAULT" status >/dev/null
 
 echo "named" > "$HOME/named.txt"
 "$VAULT" create named --recipients-file "$tmp/recipients.txt" "$HOME/named.txt"

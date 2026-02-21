@@ -306,7 +306,7 @@ cmd_lockdown() {
   check_deps age fd
   ensure_config
 
-  local -a recipients=()
+  local recipients=()
   local recipients_file=""
   local passphrase=""
   local passphrase_stdin=0
@@ -448,7 +448,7 @@ cmd_unlock() {
   local keep_keychain=0
   local passphrase=""
   local passphrase_stdin=0
-  local -a identity_files=()
+  local identity_files=()
   local identity_stdin=0
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
@@ -545,7 +545,7 @@ cmd_create() {
 
   local passphrase=""
   local passphrase_stdin=0
-  local -a recipients=()
+  local recipients=()
   local recipients_file=""
   local generate_pass=0
   while [[ "${1:-}" == --* ]]; do
@@ -701,7 +701,7 @@ cmd_open() {
   local passphrase=""
   local passphrase_stdin=0
   local keep_keychain=0
-  local -a identity_files=()
+  local identity_files=()
   local identity_stdin=0
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
