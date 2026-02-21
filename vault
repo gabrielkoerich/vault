@@ -401,7 +401,9 @@ cmd_lockdown() {
     else
       passphrase="$(ensure_passphrase_create "default" "$passphrase" "$passphrase_stdin")"
     fi
-    AGE_PASSPHRASE="$passphrase" age -p -o "$VAULT_FILE" "$tmp_tar"
+    export AGE_PASSPHRASE="$passphrase"
+    age -p -o "$VAULT_FILE" "$tmp_tar"
+    unset AGE_PASSPHRASE
     keychain_set "default" "$passphrase" || true
   fi
   rm -f "$tmp_tar"
@@ -523,7 +525,9 @@ cmd_unlock() {
     age --decrypt -o "$tmp_tar" "${age_args[@]}" "$VAULT_FILE"
   else
     passphrase="$(ensure_passphrase_open "default" "$passphrase" "$passphrase_stdin")"
-    AGE_PASSPHRASE="$passphrase" age --decrypt -o "$tmp_tar" "$VAULT_FILE"
+    export AGE_PASSPHRASE="$passphrase"
+    age --decrypt -o "$tmp_tar" "$VAULT_FILE"
+    unset AGE_PASSPHRASE
   fi
   tar -xf "$tmp_tar" -C "$HOME"
   rm -f "$tmp_tar"
@@ -663,7 +667,9 @@ cmd_create() {
     else
       passphrase="$(ensure_passphrase_create "$name" "$passphrase" "$passphrase_stdin")"
     fi
-    AGE_PASSPHRASE="$passphrase" age -p -o "$vault_file" "$tmp_tar"
+    export AGE_PASSPHRASE="$passphrase"
+    age -p -o "$vault_file" "$tmp_tar"
+    unset AGE_PASSPHRASE
     keychain_set "$name" "$passphrase" || true
   fi
   rm -f "$tmp_tar"
@@ -786,7 +792,9 @@ cmd_open() {
     age --decrypt -o "$tmp_tar" "${age_args[@]}" "$vault_file"
   else
     passphrase="$(ensure_passphrase_open "$name" "$passphrase" "$passphrase_stdin")"
-    AGE_PASSPHRASE="$passphrase" age --decrypt -o "$tmp_tar" "$vault_file"
+    export AGE_PASSPHRASE="$passphrase"
+    age --decrypt -o "$tmp_tar" "$vault_file"
+    unset AGE_PASSPHRASE
   fi
   tar -xf "$tmp_tar" -P
   rm -f "$tmp_tar"
