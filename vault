@@ -140,9 +140,9 @@ prompt_passphrase_create() {
   echo "no passphrase found in keychain for '$(keychain_service_for "$name")'"
   echo "enter a new passphrase (will be saved to keychain)"
   echo ""
-  read -s -p "passphrase: " passphrase < /dev/tty
+  read -r -s -p "passphrase: " passphrase < /dev/tty
   echo "" > /dev/tty
-  read -s -p "confirm passphrase: " confirm < /dev/tty
+  read -r -s -p "confirm passphrase: " confirm < /dev/tty
   echo "" > /dev/tty
 
   if [ -z "$passphrase" ] || [ "$passphrase" != "$confirm" ]; then
@@ -160,7 +160,7 @@ prompt_passphrase_open() {
   echo "no passphrase found in keychain for '$(keychain_service_for "$name")'"
   echo "enter the passphrase to decrypt"
   echo ""
-  read -s -p "passphrase: " passphrase < /dev/tty
+  read -r -s -p "passphrase: " passphrase < /dev/tty
   echo "" > /dev/tty
   printf '%s' "$passphrase"
 }
