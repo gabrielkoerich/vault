@@ -45,12 +45,19 @@ expect_fail() {
   fi
 }
 
+# True only when /dev/tty can actually be opened (real interactive terminal).
+# [ -c /dev/tty ] only checks the device exists, not that it's usable.
+can_use_tty() {
+  { exec 3</dev/tty && exec 3>&-; } 2>/dev/null
+}
+
 echo "secret" > "$HOME/secret.txt"
 printf '%s\n' "$HOME/secret.txt" > "$VAULT_CONFIG_DIR/paths"
 
 pubkey="$(age-keygen -o "$tmp/ci.key" 2>&1 | awk '/Public key:/ {print $3}')"
 echo "$pubkey" > "$tmp/recipients.txt"
 
+# --- recipient / default-vault tests (CI-safe) ---
 "$VAULT" lockdown --recipients-file "$tmp/recipients.txt"
 test -f "$VAULT_FILE"
 test ! -e "$HOME/secret.txt"
@@ -63,6 +70,7 @@ grep -q "secret" "$HOME/secret.txt"
 
 "$VAULT" status >/dev/null
 
+# --- named vault tests (CI-safe) ---
 echo "named" > "$HOME/named.txt"
 "$VAULT" create named --recipients-file "$tmp/recipients.txt" "$HOME/named.txt"
 test -f "$VAULTS_DIR/named.tar.age"
@@ -71,7 +79,26 @@ test ! -e "$HOME/named.txt"
 test -f "$HOME/named.txt"
 grep -q "named" "$HOME/named.txt"
 
-if { [ -c /dev/tty ] || [ -t 0 ]; } && [ "$(uname)" = "Darwin" ] && command -v security >/dev/null 2>&1; then
+# --- named vault with identity-stdin (CI-safe) ---
+echo "recipient" > "$HOME/rec.txt"
+"$VAULT" create rec --recipients-file "$tmp/recipients.txt" "$HOME/rec.txt"
+test -f "$VAULTS_DIR/rec.tar.age"
+test ! -e "$HOME/rec.txt"
+cat "$tmp/ci.key" | "$VAULT" open rec --identity-stdin
+test -f "$HOME/rec.txt"
+grep -q "recipient" "$HOME/rec.txt"
+
+# --- install script (CI-safe) ---
+PREFIX="$tmp/prefix" "$ROOT/install.sh"
+test -x "$tmp/prefix/bin/vault"
+
+# --- error cases (CI-safe) ---
+expect_fail "$VAULT" open rec --identity-file "$tmp/missing.key"
+expect_fail "$VAULT" create rec2 --recipients-file "$tmp/missing.recipients" "$HOME/rec.txt"
+
+# --- generate-pass + keychain tests (macOS interactive only) ---
+# age -p always reads passphrase from /dev/tty; these cannot run non-interactively.
+if can_use_tty && [ "$(uname)" = "Darwin" ] && command -v security >/dev/null 2>&1; then
   echo "gen" > "$HOME/gen.txt"
   "$VAULT" create gen --generate-pass "$HOME/gen.txt"
   test -f "$VAULTS_DIR/gen.tar.age"
@@ -81,18 +108,8 @@ if { [ -c /dev/tty ] || [ -t 0 ]; } && [ "$(uname)" = "Darwin" ] && command -v s
   grep -q "gen" "$HOME/gen.txt"
 fi
 
-echo "recipient" > "$HOME/rec.txt"
-"$VAULT" create rec --recipients-file "$tmp/recipients.txt" "$HOME/rec.txt"
-test -f "$VAULTS_DIR/rec.tar.age"
-test ! -e "$HOME/rec.txt"
-cat "$tmp/ci.key" | "$VAULT" open rec --identity-stdin
-test -f "$HOME/rec.txt"
-grep -q "recipient" "$HOME/rec.txt"
-
-PREFIX="$tmp/prefix" "$ROOT/install.sh"
-test -x "$tmp/prefix/bin/vault"
-
-if [ -c /dev/tty ] || [ -t 0 ]; then
+# --- explicit passphrase tests (interactive only, age -p requires /dev/tty) ---
+if can_use_tty; then
   passphrase="testpass-123"
   echo "badpass" > "$HOME/badpass.txt"
   "$VAULT" create badpass --passphrase "$passphrase" "$HOME/badpass.txt"
@@ -106,16 +123,16 @@ if [ -c /dev/tty ] || [ -t 0 ]; then
   echo "dup" > "$HOME/dup.txt"
   "$VAULT" create dup --passphrase "x" "$HOME/dup.txt"
   expect_fail "$VAULT" create dup --passphrase "x" "$HOME/dup.txt"
-  cat "$tmp/ci.key" | "$VAULT" open dup --identity-stdin
+  # identity-stdin cannot open a passphrase-encrypted vault
+  expect_fail bash -c "cat '$tmp/ci.key' | '$VAULT' open dup --identity-stdin"
+  "$VAULT" open dup --passphrase "x"
 
   echo "mix" > "$HOME/mix.txt"
   expect_fail "$VAULT" create mix --passphrase "x" --recipient "$pubkey" "$HOME/mix.txt"
 fi
 
-expect_fail "$VAULT" open rec --identity-file "$tmp/missing.key"
-expect_fail "$VAULT" create rec2 --recipients-file "$tmp/missing.recipients" "$HOME/rec.txt"
-
-if { [ -c /dev/tty ] || [ -t 0 ]; } && [ "$(uname)" = "Darwin" ] && command -v security >/dev/null 2>&1; then
+# --- keychain tests (macOS interactive only) ---
+if can_use_tty && [ "$(uname)" = "Darwin" ] && command -v security >/dev/null 2>&1; then
   echo "kc" > "$HOME/kc.txt"
   security add-generic-password -a "$USER" -s "${KEYCHAIN_PREFIX}:kc" -w "kcpass" -U >/dev/null
   "$VAULT" create kc "$HOME/kc.txt"

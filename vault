@@ -140,6 +140,10 @@ read_passphrase() {
     passphrase="$(cat)"
   fi
 
+  if [ -z "$passphrase" ] && [ -n "${VAULT_PASSPHRASE:-}" ]; then
+    passphrase="$VAULT_PASSPHRASE"
+  fi
+
   if [ -z "$passphrase" ]; then
     passphrase="$(keychain_get "$name" || true)"
   fi
@@ -391,9 +395,11 @@ cmd_lockdown() {
     if [ -n "$recipients_file" ]; then
       age_args+=("-R" "$recipients_file")
     fi
-    for r in "${recipients[@]}"; do
-      [ -n "$r" ] && age_args+=("-r" "$r")
-    done
+    if [ ${#recipients[@]} -gt 0 ]; then
+      for r in "${recipients[@]}"; do
+        [ -n "$r" ] && age_args+=("-r" "$r")
+      done
+    fi
     age -o "$VAULT_FILE" "${age_args[@]}" "$tmp_tar"
   else
     if [ "$generate_pass" -eq 1 ]; then
@@ -550,38 +556,14 @@ cmd_create() {
   local generate_pass=0
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
-      --recipient)
-        recipients+=("${2:-}")
-        shift 2
-        ;;
-      --recipients-file)
-        recipients_file="${2:-}"
-        shift 2
-        ;;
-      --passphrase|--pass)
-        passphrase="${2:-}"
-        shift 2
-        ;;
-      --passphrase-stdin)
-        passphrase_stdin=1
-        shift
-        ;;
-      --generate-pass)
-        generate_pass=1
-        shift
-        ;;
-      --)
-        shift
-        break
-        ;;
-      -h|--help)
-        usage
-        exit 0
-        ;;
-      *)
-        echo "unknown option: $1" >&2
-        exit 1
-        ;;
+      --recipient) recipients+=("${2:-}"); shift 2 ;;
+      --recipients-file) recipients_file="${2:-}"; shift 2 ;;
+      --passphrase|--pass) passphrase="${2:-}"; shift 2 ;;
+      --passphrase-stdin) passphrase_stdin=1; shift ;;
+      --generate-pass) generate_pass=1; shift ;;
+      --) shift; break ;;
+      -h|--help) usage; exit 0 ;;
+      *) echo "unknown option: $1" >&2; exit 1 ;;
     esac
   done
 
@@ -592,6 +574,19 @@ cmd_create() {
     echo "error: vault name is required" >&2
     exit 1
   fi
+
+  # Allow flags after the vault name too (e.g. vault create myname --recipients-file ...)
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --recipient) recipients+=("${2:-}"); shift 2 ;;
+      --recipients-file) recipients_file="${2:-}"; shift 2 ;;
+      --passphrase|--pass) passphrase="${2:-}"; shift 2 ;;
+      --passphrase-stdin) passphrase_stdin=1; shift ;;
+      --generate-pass) generate_pass=1; shift ;;
+      --) shift; break ;;
+      *) break ;;
+    esac
+  done
 
   if [ $# -eq 0 ]; then
     echo "error: provide at least one path to lock" >&2
@@ -657,9 +652,11 @@ cmd_create() {
     if [ -n "$recipients_file" ]; then
       age_args+=("-R" "$recipients_file")
     fi
-    for r in "${recipients[@]}"; do
-      [ -n "$r" ] && age_args+=("-r" "$r")
-    done
+    if [ ${#recipients[@]} -gt 0 ]; then
+      for r in "${recipients[@]}"; do
+        [ -n "$r" ] && age_args+=("-r" "$r")
+      done
+    fi
     age -o "$vault_file" "${age_args[@]}" "$tmp_tar"
   else
     if [ "$generate_pass" -eq 1 ]; then
@@ -741,10 +738,25 @@ cmd_open() {
   done
 
   local name="${1:-}"
+  shift || true
+
   if [ -z "$name" ]; then
     echo "error: vault name is required" >&2
     exit 1
   fi
+
+  # Allow flags after the vault name too (e.g. vault open myname --identity-file ...)
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --keep-keychain) keep_keychain=1; shift ;;
+      --identity-file) identity_files+=("${2:-}"); shift 2 ;;
+      --identity-stdin) identity_stdin=1; shift ;;
+      --passphrase|--pass) passphrase="${2:-}"; shift 2 ;;
+      --passphrase-stdin) passphrase_stdin=1; shift ;;
+      --) shift; break ;;
+      *) break ;;
+    esac
+  done
 
   local vault_file="$VAULTS_DIR/$name.tar.age"
   local manifest_file="$VAULTS_DIR/$name-manifest"
@@ -918,7 +930,7 @@ cmd_paths() {
 case "${1:-}" in
   init|setup) cmd_init ;;
   lockdown|lock) shift; cmd_lockdown "$@" ;;
-  unlock) cmd_unlock "$@" ;;
+  unlock) shift; cmd_unlock "$@" ;;
   create) shift; cmd_create "$@" ;;
   open) shift; cmd_open "$@" ;;
   scan) cmd_scan ;;

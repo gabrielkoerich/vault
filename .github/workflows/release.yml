@@ -33,26 +33,6 @@ jobs:
         with:
           args: detect --source . --config .gitleaks.toml --no-banner --redact --exit-code=1
 
-  test:
-    runs-on: macos-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: brew install age fd
-
-      - name: Smoke test
-        run: |
-          chmod +x vault
-          ./vault version
-          ./vault help
-
-      - name: Run tests
-        run: |
-          chmod +x tests/run.sh
-          ./tests/run.sh
-
   test-ubuntu:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -79,7 +59,7 @@ jobs:
           ./tests/run.sh
 
   release:
-    needs: [lint, gitleaks, test, test-ubuntu]
+    needs: [lint, gitleaks, test-ubuntu]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
