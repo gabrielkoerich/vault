@@ -54,7 +54,12 @@ can_use_tty() {
 echo "secret" > "$HOME/secret.txt"
 printf '%s\n' "$HOME/secret.txt" > "$VAULT_CONFIG_DIR/paths"
 
-pubkey="$(age-keygen -o "$tmp/ci.key" 2>&1 | awk '/Public key:/ {print $3}')"
+# Generate key and extract public key
+age-keygen -o "$tmp/ci.key" 2> "$tmp/keygen.out"
+pubkey="$(awk '/Public key:/ {print $3}' "$tmp/keygen.out")"
+# Ensure the key file is fully written before we continue
+sync
+
 echo "$pubkey" > "$tmp/recipients.txt"
 
 # --- recipient / default-vault tests (CI-safe) ---
