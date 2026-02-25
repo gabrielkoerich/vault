@@ -19,6 +19,7 @@ load_settings() {
   DELETE_METHOD="${DELETE_METHOD:-trash}"
   ENV_SCAN_DIRS="${ENV_SCAN_DIRS:-$HOME}"
   EXCLUDE_PATHS="${EXCLUDE_PATHS:-}"
+  VAULT_NO_ENV_SCAN="${VAULT_NO_ENV_SCAN:-0}"
 }
 
 is_excluded() {
@@ -66,6 +67,21 @@ check_deps() {
   fi
 }
 
+generate_passphrase() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -base64 32 | tr -d '\n'
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - <<'PY'
+import secrets, base64
+print(base64.b64encode(secrets.token_bytes(32)).decode().strip())
+PY
+    return 0
+  fi
+  echo "error: cannot generate passphrase (missing openssl or python3)" >&2
+  exit 1
+}
 ensure_config() {
   if [ ! -f "$PATHS_FILE" ]; then
     echo "error: vault is not set up yet" >&2
@@ -122,6 +138,10 @@ read_passphrase() {
 
   if [ "$passphrase_stdin" -eq 1 ]; then
     passphrase="$(cat)"
+  fi
+
+  if [ -z "$passphrase" ] && [ -n "${VAULT_PASSPHRASE:-}" ]; then
+    passphrase="$VAULT_PASSPHRASE"
   fi
 
   if [ -z "$passphrase" ]; then
@@ -218,14 +238,18 @@ read_paths() {
   # optionally collect .env files
   local scan_dirs
   scan_dirs="$(eval echo "$ENV_SCAN_DIRS")"
-  read -p "scan for .env files under $scan_dirs? (Y/n) " -n 1 -r < /dev/tty
-  echo "" > /dev/tty
-  if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-    while IFS= read -r envfile; do
-      is_self "$envfile" && continue
-      is_excluded "$envfile" && continue
-      paths+=("$envfile")
-    done < <(fd -t f -H --no-ignore -g '.env*' "$scan_dirs" 2>/dev/null)
+  if [ "$VAULT_NO_ENV_SCAN" -eq 1 ]; then
+    :
+  else
+    read -p "scan for .env files under $scan_dirs? (Y/n) " -n 1 -r < /dev/tty
+    echo "" > /dev/tty
+    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+      while IFS= read -r envfile; do
+        is_self "$envfile" && continue
+        is_excluded "$envfile" && continue
+        paths+=("$envfile")
+      done < <(fd -t f -H --no-ignore -g '.env*' "$scan_dirs" 2>/dev/null)
+    fi
   fi
 
   printf '%s\n' "${paths[@]}"
@@ -286,6 +310,56 @@ cmd_lockdown() {
   check_deps age fd
   ensure_config
 
+  local recipients=()
+  local recipients_file=""
+  local passphrase=""
+  local passphrase_stdin=0
+  local generate_pass=0
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --recipient)
+        recipients+=("${2:-}")
+        shift 2
+        ;;
+      --recipients-file)
+        recipients_file="${2:-}"
+        shift 2
+        ;;
+      --passphrase|--pass)
+        passphrase="${2:-}"
+        shift 2
+        ;;
+      --passphrase-stdin)
+        passphrase_stdin=1
+        shift
+        ;;
+      --generate-pass)
+        generate_pass=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        echo "unknown option: $1" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  if [ -z "$recipients_file" ] && [ -n "${VAULT_RECIPIENTS_FILE:-}" ]; then
+    recipients_file="$VAULT_RECIPIENTS_FILE"
+  fi
+  if [ -n "$recipients_file" ] && [ ! -f "$recipients_file" ]; then
+    echo "error: recipients file not found: $recipients_file" >&2
+    exit 1
+  fi
+  if { [ ${#recipients[@]} -gt 0 ] || [ -n "$recipients_file" ]; } && { [ -n "$passphrase" ] || [ "$passphrase_stdin" -eq 1 ] || [ "$generate_pass" -eq 1 ]; }; then
+    echo "error: cannot use passphrase options with recipient mode" >&2
+    exit 1
+  fi
+
   if [ -f "$VAULT_FILE" ]; then
     echo "error: $VAULT_FILE already exists — already locked? run 'vault unlock' first" >&2
     exit 1
@@ -310,16 +384,34 @@ cmd_lockdown() {
   # tar and encrypt with passphrase
   local tmp_tar
   tmp_tar="$(mktemp)"
-  trap 'rm -f "$tmp_tar"' EXIT
+  trap 'rm -f "$tmp_tar"' RETURN
   tar -cf "$tmp_tar" -C "$HOME" "${paths[@]/#$HOME\//}" 2> >(grep -v 'socket ignored' >&2)
 
   echo ""
   echo "WARNING: if you lose your passphrase, you will lose access to all locked files."
   echo ""
-  local passphrase=""
-  passphrase="$(ensure_passphrase_create "default" "" 0)"
-  AGE_PASSPHRASE="$passphrase" age -p -o "$VAULT_FILE" "$tmp_tar"
-  keychain_set "default" "$passphrase" || true
+  if [ ${#recipients[@]} -gt 0 ] || [ -n "$recipients_file" ]; then
+    local age_args=()
+    if [ -n "$recipients_file" ]; then
+      age_args+=("-R" "$recipients_file")
+    fi
+    if [ ${#recipients[@]} -gt 0 ]; then
+      for r in "${recipients[@]}"; do
+        [ -n "$r" ] && age_args+=("-r" "$r")
+      done
+    fi
+    age -o "$VAULT_FILE" "${age_args[@]}" "$tmp_tar"
+  else
+    if [ "$generate_pass" -eq 1 ]; then
+      passphrase="$(generate_passphrase)"
+    else
+      passphrase="$(ensure_passphrase_create "default" "$passphrase" "$passphrase_stdin")"
+    fi
+    export AGE_PASSPHRASE="$passphrase"
+    age -p -o "$VAULT_FILE" "$tmp_tar"
+    unset AGE_PASSPHRASE
+    keychain_set "default" "$passphrase" || true
+  fi
   rm -f "$tmp_tar"
 
   # verify before removing
@@ -360,10 +452,30 @@ cmd_lockdown() {
 cmd_unlock() {
   check_deps age
   local keep_keychain=0
+  local passphrase=""
+  local passphrase_stdin=0
+  local identity_files=()
+  local identity_stdin=0
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
       --keep-keychain)
         keep_keychain=1
+        shift
+        ;;
+      --passphrase|--pass)
+        passphrase="${2:-}"
+        shift 2
+        ;;
+      --passphrase-stdin)
+        passphrase_stdin=1
+        shift
+        ;;
+      --identity-file)
+        identity_files+=("${2:-}")
+        shift 2
+        ;;
+      --identity-stdin)
+        identity_stdin=1
         shift
         ;;
       -h|--help)
@@ -383,12 +495,49 @@ cmd_unlock() {
 
   local tmp_tar
   tmp_tar="$(mktemp)"
-  trap 'rm -f "$tmp_tar"' EXIT
-  local passphrase=""
-  passphrase="$(ensure_passphrase_open "default" "" 0)"
-  AGE_PASSPHRASE="$passphrase" age --decrypt -o "$tmp_tar" "$VAULT_FILE"
+  trap 'rm -f "$tmp_tar"' RETURN
+  local identity_tmp=""
+  if [ -z "${VAULT_IDENTITY_FILE:-}" ] || [ ${#identity_files[@]} -gt 0 ] || [ "$identity_stdin" -eq 1 ]; then
+    : # identity_files already set
+  else
+    identity_files+=("$VAULT_IDENTITY_FILE")
+  fi
+  if { [ ${#identity_files[@]} -gt 0 ] || [ "$identity_stdin" -eq 1 ] || [ -n "${VAULT_IDENTITY_FILE:-}" ]; } && { [ -n "$passphrase" ] || [ "$passphrase_stdin" -eq 1 ]; }; then
+    echo "error: cannot use passphrase options with identity mode" >&2
+    exit 1
+  fi
+
+  if [ "$identity_stdin" -eq 1 ]; then
+    if [ "$passphrase_stdin" -eq 1 ]; then
+      echo "error: cannot use --identity-stdin and --passphrase-stdin together" >&2
+      exit 1
+    fi
+    identity_tmp="$(mktemp)"
+    cat > "$identity_tmp"
+    identity_files+=("$identity_tmp")
+  fi
+
+  if [ ${#identity_files[@]} -gt 0 ]; then
+    for id in "${identity_files[@]}"; do
+      if [ ! -f "$id" ]; then
+        echo "error: identity file not found: $id" >&2
+        exit 1
+      fi
+    done
+    local age_args=()
+    for id in "${identity_files[@]}"; do
+      [ -n "$id" ] && age_args+=("-i" "$id")
+    done
+    age --decrypt -o "$tmp_tar" "${age_args[@]}" "$VAULT_FILE"
+  else
+    passphrase="$(ensure_passphrase_open "default" "$passphrase" "$passphrase_stdin")"
+    export AGE_PASSPHRASE="$passphrase"
+    age --decrypt -o "$tmp_tar" "$VAULT_FILE"
+    unset AGE_PASSPHRASE
+  fi
   tar -xf "$tmp_tar" -C "$HOME"
   rm -f "$tmp_tar"
+  [ -n "$identity_tmp" ] && rm -f "$identity_tmp"
 
   rm -f "$VAULT_FILE" "$MANIFEST_FILE"
   if [ "$keep_keychain" -eq 0 ]; then
@@ -402,28 +551,19 @@ cmd_create() {
 
   local passphrase=""
   local passphrase_stdin=0
+  local recipients=()
+  local recipients_file=""
+  local generate_pass=0
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
-      --passphrase)
-        passphrase="${2:-}"
-        shift 2
-        ;;
-      --passphrase-stdin)
-        passphrase_stdin=1
-        shift
-        ;;
-      --)
-        shift
-        break
-        ;;
-      -h|--help)
-        usage
-        exit 0
-        ;;
-      *)
-        echo "unknown option: $1" >&2
-        exit 1
-        ;;
+      --recipient) recipients+=("${2:-}"); shift 2 ;;
+      --recipients-file) recipients_file="${2:-}"; shift 2 ;;
+      --passphrase|--pass) passphrase="${2:-}"; shift 2 ;;
+      --passphrase-stdin) passphrase_stdin=1; shift ;;
+      --generate-pass) generate_pass=1; shift ;;
+      --) shift; break ;;
+      -h|--help) usage; exit 0 ;;
+      *) echo "unknown option: $1" >&2; exit 1 ;;
     esac
   done
 
@@ -434,6 +574,19 @@ cmd_create() {
     echo "error: vault name is required" >&2
     exit 1
   fi
+
+  # Allow flags after the vault name too (e.g. vault create myname --recipients-file ...)
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --recipient) recipients+=("${2:-}"); shift 2 ;;
+      --recipients-file) recipients_file="${2:-}"; shift 2 ;;
+      --passphrase|--pass) passphrase="${2:-}"; shift 2 ;;
+      --passphrase-stdin) passphrase_stdin=1; shift ;;
+      --generate-pass) generate_pass=1; shift ;;
+      --) shift; break ;;
+      *) break ;;
+    esac
+  done
 
   if [ $# -eq 0 ]; then
     echo "error: provide at least one path to lock" >&2
@@ -475,16 +628,47 @@ cmd_create() {
 
   local tmp_tar
   tmp_tar="$(mktemp)"
-  trap 'rm -f "$tmp_tar"' EXIT
+  trap 'rm -f "$tmp_tar"' RETURN
   tar -cf "$tmp_tar" -P "${paths[@]}" 2> >(grep -v 'socket ignored' >&2)
 
   echo ""
   echo "WARNING: if you lose your passphrase, you will lose access to this vault."
   echo ""
 
-  passphrase="$(ensure_passphrase_create "$name" "$passphrase" "$passphrase_stdin")"
-  AGE_PASSPHRASE="$passphrase" age -p -o "$vault_file" "$tmp_tar"
-  keychain_set "$name" "$passphrase" || true
+  if [ -z "$recipients_file" ] && [ -n "${VAULT_RECIPIENTS_FILE:-}" ]; then
+    recipients_file="$VAULT_RECIPIENTS_FILE"
+  fi
+  if [ -n "$recipients_file" ] && [ ! -f "$recipients_file" ]; then
+    echo "error: recipients file not found: $recipients_file" >&2
+    exit 1
+  fi
+  if { [ ${#recipients[@]} -gt 0 ] || [ -n "$recipients_file" ]; } && { [ -n "$passphrase" ] || [ "$passphrase_stdin" -eq 1 ] || [ "$generate_pass" -eq 1 ]; }; then
+    echo "error: cannot use passphrase options with recipient mode" >&2
+    exit 1
+  fi
+
+  if [ ${#recipients[@]} -gt 0 ] || [ -n "$recipients_file" ]; then
+    local age_args=()
+    if [ -n "$recipients_file" ]; then
+      age_args+=("-R" "$recipients_file")
+    fi
+    if [ ${#recipients[@]} -gt 0 ]; then
+      for r in "${recipients[@]}"; do
+        [ -n "$r" ] && age_args+=("-r" "$r")
+      done
+    fi
+    age -o "$vault_file" "${age_args[@]}" "$tmp_tar"
+  else
+    if [ "$generate_pass" -eq 1 ]; then
+      passphrase="$(generate_passphrase)"
+    else
+      passphrase="$(ensure_passphrase_create "$name" "$passphrase" "$passphrase_stdin")"
+    fi
+    export AGE_PASSPHRASE="$passphrase"
+    age -p -o "$vault_file" "$tmp_tar"
+    unset AGE_PASSPHRASE
+    keychain_set "$name" "$passphrase" || true
+  fi
   rm -f "$tmp_tar"
 
   if [ ! -f "$vault_file" ]; then
@@ -514,13 +698,23 @@ cmd_open() {
   local passphrase=""
   local passphrase_stdin=0
   local keep_keychain=0
+  local identity_files=()
+  local identity_stdin=0
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
       --keep-keychain)
         keep_keychain=1
         shift
         ;;
-      --passphrase)
+      --identity-file)
+        identity_files+=("${2:-}")
+        shift 2
+        ;;
+      --identity-stdin)
+        identity_stdin=1
+        shift
+        ;;
+      --passphrase|--pass)
         passphrase="${2:-}"
         shift 2
         ;;
@@ -544,10 +738,25 @@ cmd_open() {
   done
 
   local name="${1:-}"
+  shift || true
+
   if [ -z "$name" ]; then
     echo "error: vault name is required" >&2
     exit 1
   fi
+
+  # Allow flags after the vault name too (e.g. vault open myname --identity-file ...)
+  while [[ "${1:-}" == --* ]]; do
+    case "$1" in
+      --keep-keychain) keep_keychain=1; shift ;;
+      --identity-file) identity_files+=("${2:-}"); shift 2 ;;
+      --identity-stdin) identity_stdin=1; shift ;;
+      --passphrase|--pass) passphrase="${2:-}"; shift 2 ;;
+      --passphrase-stdin) passphrase_stdin=1; shift ;;
+      --) shift; break ;;
+      *) break ;;
+    esac
+  done
 
   local vault_file="$VAULTS_DIR/$name.tar.age"
   local manifest_file="$VAULTS_DIR/$name-manifest"
@@ -558,12 +767,50 @@ cmd_open() {
 
   local tmp_tar
   tmp_tar="$(mktemp)"
-  trap 'rm -f "$tmp_tar"' EXIT
+  trap 'rm -f "$tmp_tar"' RETURN
 
-  passphrase="$(ensure_passphrase_open "$name" "$passphrase" "$passphrase_stdin")"
-  AGE_PASSPHRASE="$passphrase" age --decrypt -o "$tmp_tar" "$vault_file"
+  local identity_tmp=""
+  if [ -z "${VAULT_IDENTITY_FILE:-}" ] || [ ${#identity_files[@]} -gt 0 ] || [ "$identity_stdin" -eq 1 ]; then
+    : # identity_files already set
+  else
+    identity_files+=("$VAULT_IDENTITY_FILE")
+  fi
+  if { [ ${#identity_files[@]} -gt 0 ] || [ "$identity_stdin" -eq 1 ] || [ -n "${VAULT_IDENTITY_FILE:-}" ]; } && { [ -n "$passphrase" ] || [ "$passphrase_stdin" -eq 1 ]; }; then
+    echo "error: cannot use passphrase options with identity mode" >&2
+    exit 1
+  fi
+
+  if [ "$identity_stdin" -eq 1 ]; then
+    if [ "$passphrase_stdin" -eq 1 ]; then
+      echo "error: cannot use --identity-stdin and --passphrase-stdin together" >&2
+      exit 1
+    fi
+    identity_tmp="$(mktemp)"
+    cat > "$identity_tmp"
+    identity_files+=("$identity_tmp")
+  fi
+
+  if [ ${#identity_files[@]} -gt 0 ]; then
+    for id in "${identity_files[@]}"; do
+      if [ ! -f "$id" ]; then
+        echo "error: identity file not found: $id" >&2
+        exit 1
+      fi
+    done
+    local age_args=()
+    for id in "${identity_files[@]}"; do
+      [ -n "$id" ] && age_args+=("-i" "$id")
+    done
+    age --decrypt -o "$tmp_tar" "${age_args[@]}" "$vault_file"
+  else
+    passphrase="$(ensure_passphrase_open "$name" "$passphrase" "$passphrase_stdin")"
+    export AGE_PASSPHRASE="$passphrase"
+    age --decrypt -o "$tmp_tar" "$vault_file"
+    unset AGE_PASSPHRASE
+  fi
   tar -xf "$tmp_tar" -P
   rm -f "$tmp_tar"
+  [ -n "$identity_tmp" ] && rm -f "$identity_tmp"
 
   rm -f "$vault_file" "$manifest_file"
   if [ "$keep_keychain" -eq 0 ]; then
@@ -683,7 +930,7 @@ cmd_paths() {
 case "${1:-}" in
   init|setup) cmd_init ;;
   lockdown|lock) shift; cmd_lockdown "$@" ;;
-  unlock) cmd_unlock "$@" ;;
+  unlock) shift; cmd_unlock "$@" ;;
   create) shift; cmd_create "$@" ;;
   open) shift; cmd_open "$@" ;;
   scan) cmd_scan ;;

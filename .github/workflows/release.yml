@@ -33,13 +33,19 @@ jobs:
         with:
           args: detect --source . --config .gitleaks.toml --no-banner --redact --exit-code=1
 
-  test:
-    runs-on: macos-latest
+  test-ubuntu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install age
-        run: brew install age
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y age fd-find
+          if ! command -v fd >/dev/null 2>&1; then
+            sudo ln -s "$(command -v fdfind)" /usr/local/bin/fd
+          fi
 
       - name: Smoke test
         run: |
@@ -47,8 +53,13 @@ jobs:
           ./vault version
           ./vault help
 
+      - name: Run tests
+        run: |
+          chmod +x tests/run.sh
+          ./tests/run.sh
+
   release:
-    needs: [lint, gitleaks, test]
+    needs: [lint, gitleaks, test-ubuntu]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:

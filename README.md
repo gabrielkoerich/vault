@@ -146,6 +146,9 @@ During `vault lockdown`, any `.env` files found under `$HOME` are included after
 | `VAULTS_DIR` | `~/.vaults` | Directory for named vault files |
 | `KEYCHAIN_PREFIX` | `gabrielkoerich/vault` | macOS Keychain service prefix |
 | `KEYCHAIN_DELETE_CONFIRM` | `yes` | prompt before deleting Keychain entries |
+| `VAULT_RECIPIENTS_FILE` | (unset) | age recipients file (recipient mode) |
+| `VAULT_IDENTITY_FILE` | (unset) | age identity file (recipient mode) |
+| `VAULT_NO_ENV_SCAN` | `0` | skip `.env` scan prompt during lockdown |
 
 ## Keychain (default)
 
@@ -154,6 +157,82 @@ On macOS, Vault stores passphrases in Keychain by default and retrieves them on 
 Keychain entries are deleted after a vault is opened, with a confirmation prompt to avoid stale secrets.
 
 Use `--keep-keychain` on `unlock`/`open` to skip deletion.
+
+## Recipient Mode (CI / Production)
+
+Recipient mode uses **public‑key encryption** instead of a shared passphrase.
+You encrypt to one or more **recipients** (public keys). Only the matching **identity**
+(private key) can decrypt. This is ideal for CI/production because you can commit encrypted
+files to git while keeping the private key only in CI secrets. Recipient mode bypasses
+Keychain entirely.
+
+> **Note on terminology:** Vault uses age's standard terms — a **recipient** is a public key
+> you encrypt to, and an **identity** is the corresponding private key used to decrypt.
+> This matches the [age CLI](https://github.com/FiloSottile/age) (`age -r recipient`, `age -i identity`).
+
+Generate a keypair:
+
+```bash
+age-keygen -o ci.key
+```
+
+The public key is printed on stdout. Use it as a recipient and keep it in the repo (safe to share).
+Keep the private key secret (`ci.key`).
+
+Encrypt with a recipient (no Keychain involved):
+
+```bash
+vault create secrets --recipient "age1..." ~/.config/secrets
+```
+
+Or use a recipients file (one per line):
+
+```bash
+vault create secrets --recipients-file recipients.txt ~/.config/secrets
+```
+
+Decrypt in CI using the private key (stored as a CI secret):
+
+```bash
+printf '%s' "$AGE_SECRET_KEY" | vault open secrets --identity-stdin
+```
+
+You can also set:
+
+```bash
+export VAULT_RECIPIENTS_FILE=recipients.txt
+export VAULT_IDENTITY_FILE=ci.key
+```
+
+### Example: Git + GitHub Actions
+
+1. Generate the keypair once (locally):
+
+```bash
+age-keygen -o ci.key
+```
+
+2. Save the private key as a GitHub Actions secret (e.g. `AGE_SECRET_KEY`).
+3. Commit the public key (printed by `age-keygen`) to the repo in `recipients.txt`.
+4. Encrypt and commit your secrets:
+
+```bash
+vault create secrets --recipients-file recipients.txt ~/.config/secrets
+git add ~/.vaults/secrets.tar.age
+git commit -m "Add encrypted solana vault"
+```
+
+5. Decrypt in CI:
+
+```bash
+printf '%s' "$AGE_SECRET_KEY" | vault open secrets --identity-stdin
+```
+
+### Key management tips
+
+- Keep private keys only in your password manager or CI secrets.
+- You can add multiple recipients (one per line in `recipients.txt`) for shared access.
+- Rotate keys by adding a new recipient, re‑encrypting, then removing the old recipient.
 
 ## Named vaults
 
@@ -169,6 +248,21 @@ For non-interactive use, you can pass the passphrase via stdin (still saved to K
 ```bash
 printf '%s' "$VAULT_PASSPHRASE" | vault create solana --passphrase-stdin ~/.config/solana
 printf '%s' "$VAULT_PASSPHRASE" | vault open solana --passphrase-stdin
+```
+
+`--pass` is a short alias for `--passphrase`.
+
+You can auto‑generate a passphrase (works with `lockdown` and `create`):
+
+```bash
+vault create secrets --generate-pass ~/.config/secrets
+vault lockdown --generate-pass
+```
+
+## Install Without Homebrew
+
+```bash
+./install.sh
 ```
 
 ## Ideas/Roadmap
