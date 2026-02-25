@@ -74,6 +74,7 @@ test -f "$HOME/secret.txt"
 grep -q "secret" "$HOME/secret.txt"
 
 "$VAULT" status >/dev/null
+echo "ok - recipient / default-vault tests"
 
 # --- named vault tests (CI-safe) ---
 echo "named" > "$HOME/named.txt"
@@ -83,6 +84,7 @@ test ! -e "$HOME/named.txt"
 "$VAULT" open named --identity-file "$tmp/ci.key" --keep-keychain
 test -f "$HOME/named.txt"
 grep -q "named" "$HOME/named.txt"
+echo "ok - named vault tests"
 
 # --- named vault with identity-stdin (CI-safe) ---
 echo "recipient" > "$HOME/rec.txt"
@@ -92,14 +94,17 @@ test ! -e "$HOME/rec.txt"
 cat "$tmp/ci.key" | "$VAULT" open rec --identity-stdin
 test -f "$HOME/rec.txt"
 grep -q "recipient" "$HOME/rec.txt"
+echo "ok - named vault with identity-stdin"
 
 # --- install script (CI-safe) ---
 PREFIX="$tmp/prefix" "$ROOT/install.sh"
 test -x "$tmp/prefix/bin/vault"
+echo "ok - install script"
 
 # --- error cases (CI-safe) ---
 expect_fail "$VAULT" open rec --identity-file "$tmp/missing.key"
 expect_fail "$VAULT" create rec2 --recipients-file "$tmp/missing.recipients" "$HOME/rec.txt"
+echo "ok - error cases"
 
 # --- generate-pass + keychain tests (macOS interactive only) ---
 # age -p always reads passphrase from /dev/tty; these cannot run non-interactively.
@@ -111,6 +116,7 @@ if can_use_tty && [ "$(uname)" = "Darwin" ] && command -v security >/dev/null 2>
   "$VAULT" open gen
   test -f "$HOME/gen.txt"
   grep -q "gen" "$HOME/gen.txt"
+  echo "ok - generate-pass + keychain tests"
 fi
 
 # --- explicit passphrase tests (interactive only, age -p requires /dev/tty) ---
@@ -134,6 +140,7 @@ if can_use_tty; then
 
   echo "mix" > "$HOME/mix.txt"
   expect_fail "$VAULT" create mix --passphrase "x" --recipient "$pubkey" "$HOME/mix.txt"
+  echo "ok - explicit passphrase tests"
 fi
 
 # --- keychain tests (macOS interactive only) ---
@@ -146,6 +153,7 @@ if can_use_tty && [ "$(uname)" = "Darwin" ] && command -v security >/dev/null 2>
   "$VAULT" open kc
   test -f "$HOME/kc.txt"
   expect_fail security find-generic-password -a "$USER" -s "${KEYCHAIN_PREFIX}:kc" >/dev/null
+  echo "ok - keychain tests"
 fi
 
 echo "ok"
