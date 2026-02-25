@@ -166,6 +166,10 @@ You encrypt to one or more **recipients** (public keys). Only the matching **ide
 files to git while keeping the private key only in CI secrets. Recipient mode bypasses
 Keychain entirely.
 
+> **Note on terminology:** Vault uses age's standard terms — a **recipient** is a public key
+> you encrypt to, and an **identity** is the corresponding private key used to decrypt.
+> This matches the [age CLI](https://github.com/FiloSottile/age) (`age -r recipient`, `age -i identity`).
+
 Generate a keypair:
 
 ```bash
