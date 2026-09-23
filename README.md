@@ -17,14 +17,16 @@ Vault removes the surface entirely. No files on disk means nothing to steal. Use
 
 ## How it works
 
-1. **lockdown** reads paths from `~/.config/vault/paths`, optionally scans for `.env` files under `$HOME`, bundles everything into a tar archive, encrypts it with a passphrase using `age -p`, then removes the originals.
-2. **unlock** decrypts the archive with your passphrase and extracts everything back to the original locations.
+1. **lockdown** reads paths from `~/.config/vault/paths`, optionally scans for `.env` files under `$HOME`, bundles everything into a tar archive, encrypts it to an age identity held in the macOS Keychain, then removes the originals.
+2. **unlock** fetches that identity from the Keychain and extracts everything back to the original locations.
+
+Run `vault lockdown --dry-run` first to see exactly what would be locked.
 
 The vault file lives at `~/.vault.tar.age`. A manifest at `~/.vault-manifest` tracks what was locked (useful for `vault status`).
 
-Passphrase encryption means no keys need to exist on disk — the only secret is in your head.
+The identity never touches the disk. It is generated on first use and stored in the Keychain. With `age-plugin-se` installed the key lives in the Secure Enclave, and decryption asks for a fingerprint.
 
-> ⚠️ *If you lose your passphrase, you will lose access to all locked files.*
+> ⚠️ *If you lose the Keychain entry, you will lose access to all locked files. A Secure Enclave key cannot be exported or moved to another Mac, so keep a recovery recipient for anything you cannot afford to lose.*
 
 ## Quickstart
 
@@ -152,7 +154,9 @@ During `vault lockdown`, any `.env` files found under `$HOME` are included after
 
 ## Keychain (default)
 
-On macOS, Vault stores passphrases in Keychain by default and retrieves them on `lockdown/open`. If no entry exists, Vault prompts you and saves it.
+On macOS, Vault generates an age identity on first use, stores it in the Keychain, and reuses it for that vault name. Nothing prompts for a passphrase, because age cannot accept one non-interactively.
+
+Set `VAULT_KEYCHAIN` to target a specific keychain file, and `VAULT_IDENTITY_KIND=plain` to skip the Secure Enclave even when `age-plugin-se` is installed.
 
 Keychain entries are deleted after a vault is opened, with a confirmation prompt to avoid stale secrets.
 
@@ -243,21 +247,16 @@ vault create solana ~/.config/solana ~/.config/solana/id.json
 vault open solana
 ```
 
-For non-interactive use, you can pass the passphrase via stdin (still saved to Keychain on macOS):
+Both commands are non-interactive on macOS, since the identity comes from the Keychain.
+
+On Linux, or anywhere without a Keychain, use recipient mode:
 
 ```bash
-printf '%s' "$VAULT_PASSPHRASE" | vault create solana --passphrase-stdin ~/.config/solana
-printf '%s' "$VAULT_PASSPHRASE" | vault open solana --passphrase-stdin
+vault create solana --recipients-file recipients.txt ~/.config/solana
+vault open solana --identity-file ci.key
 ```
 
-`--pass` is a short alias for `--passphrase`.
-
-You can auto‑generate a passphrase (works with `lockdown` and `create`):
-
-```bash
-vault create secrets --generate-pass ~/.config/secrets
-vault lockdown --generate-pass
-```
+The `--passphrase`, `--pass`, `--passphrase-stdin` and `--generate-pass` flags were removed. They never reached age, which reads passphrases only from `/dev/tty`, so a vault could be encrypted with one passphrase while the Keychain stored another.
 
 ## Install Without Homebrew
 
