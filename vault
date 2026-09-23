@@ -39,7 +39,7 @@ vault $VERSION — lock down sensitive files with age encryption
 
 usage:
   vault init        setup config and scan for sensitive files
-  vault lockdown    encrypt and remove sensitive files from disk
+  vault lockdown    encrypt and remove sensitive files from disk (--dry-run to preview)
   vault unlock      restore sensitive files from the encrypted vault
   vault create      create a named vault from explicit paths
   vault open        decrypt a named vault
@@ -67,21 +67,6 @@ check_deps() {
   fi
 }
 
-generate_passphrase() {
-  if command -v openssl >/dev/null 2>&1; then
-    openssl rand -base64 32 | tr -d '\n'
-    return 0
-  fi
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - <<'PY'
-import secrets, base64
-print(base64.b64encode(secrets.token_bytes(32)).decode().strip())
-PY
-    return 0
-  fi
-  echo "error: cannot generate passphrase (missing openssl or python3)" >&2
-  exit 1
-}
 ensure_config() {
   if [ ! -f "$PATHS_FILE" ]; then
     echo "error: vault is not set up yet" >&2
@@ -99,114 +84,181 @@ is_darwin() {
   [[ "$(uname)" == "Darwin" ]]
 }
 
+# security resolves the default keychain through $HOME. With $HOME faked, as the
+# tests do, it puts up a modal dialog and blocks forever on a headless runner.
+# Refuse to call it unless a keychain is actually there.
+# macOS keychain, or libsecret on Linux
+secret_backend() {
+  if is_darwin; then
+    echo "security"
+  elif command -v secret-tool >/dev/null 2>&1; then
+    echo "secret-tool"
+  else
+    echo "none"
+  fi
+}
+
+keychain_available() {
+  case "$(secret_backend)" in
+    security)
+      if [ -n "${VAULT_KEYCHAIN:-}" ]; then
+        [ -f "$VAULT_KEYCHAIN" ]
+        return
+      fi
+      [ -f "$HOME/Library/Keychains/login.keychain-db" ]
+      ;;
+    secret-tool) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# only true for a terminal we can actually open, age reads passphrases from /dev/tty
+can_use_tty() {
+  { exec 3</dev/tty && exec 3>&-; } 2>/dev/null
+}
+
 keychain_get() {
   local name="${1:-default}"
-  is_darwin || return 1
+  keychain_available || return 1
   local service
   service="$(keychain_service_for "$name")"
-  security find-generic-password -a "$USER" -s "$service" -w 2>/dev/null
+  if [ "$(secret_backend)" = "secret-tool" ]; then
+    secret-tool lookup service "$service" account "$USER" 2>/dev/null
+  elif [ -n "${VAULT_KEYCHAIN:-}" ]; then
+    security find-generic-password -a "$USER" -s "$service" -w "$VAULT_KEYCHAIN" 2>/dev/null
+  else
+    security find-generic-password -a "$USER" -s "$service" -w 2>/dev/null
+  fi
 }
 
 keychain_set() {
   local name="${1:-default}"
   local passphrase="$2"
-  is_darwin || return 1
+  keychain_available || return 1
   local service
   service="$(keychain_service_for "$name")"
-  security add-generic-password -a "$USER" -s "$service" -w "$passphrase" -U >/dev/null
+  if [ "$(secret_backend)" = "secret-tool" ]; then
+    # secret-tool reads the value from stdin, so it never lands in argv
+    printf '%s' "$passphrase" | secret-tool store --label="vault: $service" service "$service" account "$USER"
+  elif [ -n "${VAULT_KEYCHAIN:-}" ]; then
+    security add-generic-password -a "$USER" -s "$service" -w "$passphrase" -U "$VAULT_KEYCHAIN" >/dev/null
+  else
+    security add-generic-password -a "$USER" -s "$service" -w "$passphrase" -U >/dev/null
+  fi
 }
 
 keychain_delete() {
   local name="${1:-default}"
-  is_darwin || return 1
+  keychain_available || return 1
   local service
   service="$(keychain_service_for "$name")"
-  if security find-generic-password -a "$USER" -s "$service" >/dev/null 2>&1; then
+  if [ "$(secret_backend)" = "secret-tool" ]; then
+    secret-tool clear service "$service" account "$USER" 2>/dev/null || true
+    return 0
+  fi
+  if security find-generic-password -a "$USER" -s "$service" ${VAULT_KEYCHAIN:+"$VAULT_KEYCHAIN"} >/dev/null 2>&1; then
     if [[ "$KEYCHAIN_DELETE_CONFIRM" == "yes" ]]; then
       read -p "delete keychain entry '$service'? (y/N) " -n 1 -r < /dev/tty
       echo "" > /dev/tty
       [[ ! $REPLY =~ ^[Yy]$ ]] && return 0
     fi
-    security delete-generic-password -a "$USER" -s "$service" >/dev/null
+    security delete-generic-password -a "$USER" -s "$service" ${VAULT_KEYCHAIN:+"$VAULT_KEYCHAIN"} >/dev/null
   fi
 }
 
-read_passphrase() {
-  local name="${1:-default}"
-  local passphrase="$2"
-  local passphrase_stdin="$3"
+# --- identity backend ------------------------------------------------------
+# age has no non-interactive passphrase option, so vaults are encrypted to a
+# generated identity whose secret lives in the keychain. With age-plugin-se
+# installed the key sits in the Secure Enclave and decryption asks for a
+# fingerprint.
 
-  if [ "$passphrase_stdin" -eq 1 ]; then
-    passphrase="$(cat)"
-  fi
-
-  if [ -z "$passphrase" ] && [ -n "${VAULT_PASSPHRASE:-}" ]; then
-    passphrase="$VAULT_PASSPHRASE"
-  fi
-
-  if [ -z "$passphrase" ]; then
-    passphrase="$(keychain_get "$name" || true)"
-  fi
-
-  printf '%s' "$passphrase"
+passphrase_removed() {
+  echo "error: passphrase mode was removed, vaults use a keychain identity now" >&2
+  echo "use --recipient or --recipients-file for explicit keys" >&2
+  exit 1
 }
 
-prompt_passphrase_create() {
+identity_kind() {
+  # tests and machines without biometry force plain keys
+  if [ -n "${VAULT_IDENTITY_KIND:-}" ]; then
+    echo "$VAULT_IDENTITY_KIND"
+    return 0
+  fi
+  if command -v age-plugin-se >/dev/null 2>&1; then
+    echo "se"
+  else
+    echo "plain"
+  fi
+}
+
+identity_generate() {
+  local out="$1"
+  if [ "$(identity_kind)" = "se" ]; then
+    age-plugin-se keygen --access-control any-biometry -o "$out" >/dev/null 2>&1
+  else
+    age-keygen -o "$out" >/dev/null 2>&1
+  fi
+}
+
+# the key line only, comments would confuse the keychain round trip
+identity_secret_line() {
+  grep -v -e '^#' -e '^$' "$1" | head -n 1
+}
+
+identity_to_file() {
+  local secret="$1" out="$2"
+  printf '%s\n' "$secret" > "$out"
+  chmod 600 "$out"
+}
+
+recipient_for_secret() {
+  local secret="$1" tmp recipient
+  tmp="$(mktemp)"
+  identity_to_file "$secret" "$tmp"
+  if [[ "$secret" == AGE-PLUGIN-SE-* ]]; then
+    recipient="$(age-plugin-se recipients -i "$tmp")"
+  else
+    recipient="$(age-keygen -y "$tmp")"
+  fi
+  rm -f "$tmp"
+  printf '%s' "$recipient"
+}
+
+# reuses the stored identity when there is one, so a name keeps its key
+ensure_identity_create() {
   local name="${1:-default}"
-  local passphrase=""
-  local confirm=""
-
-  echo ""
-  echo "no passphrase found in keychain for '$(keychain_service_for "$name")'"
-  echo "enter a new passphrase (will be saved to keychain)"
-  echo ""
-  read -r -s -p "passphrase: " passphrase < /dev/tty
-  echo "" > /dev/tty
-  read -r -s -p "confirm passphrase: " confirm < /dev/tty
-  echo "" > /dev/tty
-
-  if [ -z "$passphrase" ] || [ "$passphrase" != "$confirm" ]; then
-    echo "error: passphrases do not match" >&2
+  local secret tmp
+  secret="$(keychain_get "$name" || true)"
+  if [ -n "$secret" ]; then
+    printf '%s' "$secret"
+    return 0
+  fi
+  keychain_available || {
+    echo "error: no usable keychain (set VAULT_KEYCHAIN, or use --recipient/--recipients-file)" >&2
+    exit 1
+  }
+  # age-keygen refuses an existing file, so generate into a fresh directory
+  tmp="$(mktemp -d)"
+  identity_generate "$tmp/id"
+  secret="$(identity_secret_line "$tmp/id")"
+  rm -rf "$tmp"
+  if [ -z "$secret" ]; then
+    echo "error: could not generate an identity" >&2
     exit 1
   fi
-
-  printf '%s' "$passphrase"
+  keychain_set "$name" "$secret"
+  printf '%s' "$secret"
 }
 
-prompt_passphrase_open() {
+ensure_identity_open() {
   local name="${1:-default}"
-  local passphrase=""
-  echo ""
-  echo "no passphrase found in keychain for '$(keychain_service_for "$name")'"
-  echo "enter the passphrase to decrypt"
-  echo ""
-  read -r -s -p "passphrase: " passphrase < /dev/tty
-  echo "" > /dev/tty
-  printf '%s' "$passphrase"
-}
-
-ensure_passphrase_create() {
-  local name="${1:-default}"
-  local passphrase="$2"
-  local passphrase_stdin="$3"
-
-  passphrase="$(read_passphrase "$name" "$passphrase" "$passphrase_stdin")"
-  if [ -z "$passphrase" ]; then
-    passphrase="$(prompt_passphrase_create "$name")"
+  local secret
+  secret="$(keychain_get "$name" || true)"
+  if [ -z "$secret" ]; then
+    keychain_available && echo "no stored identity for '$(keychain_service_for "$name")', age will ask for a passphrase" >&2
+    return 1
   fi
-  printf '%s' "$passphrase"
-}
-
-ensure_passphrase_open() {
-  local name="${1:-default}"
-  local passphrase="$2"
-  local passphrase_stdin="$3"
-
-  passphrase="$(read_passphrase "$name" "$passphrase" "$passphrase_stdin")"
-  if [ -z "$passphrase" ]; then
-    passphrase="$(prompt_passphrase_open "$name")"
-  fi
-  printf '%s' "$passphrase"
+  printf '%s' "$secret"
 }
 
 is_self() {
@@ -252,7 +304,7 @@ read_paths() {
     fi
   fi
 
-  printf '%s\n' "${paths[@]}"
+  printf '%s\n' ${paths[@]+"${paths[@]}"}
 }
 
 cmd_init() {
@@ -312,11 +364,13 @@ cmd_lockdown() {
 
   local recipients=()
   local recipients_file=""
-  local passphrase=""
-  local passphrase_stdin=0
-  local generate_pass=0
+  local dry_run=0
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
+      --dry-run)
+        dry_run=1
+        shift
+        ;;
       --recipient)
         recipients+=("${2:-}")
         shift 2
@@ -325,17 +379,8 @@ cmd_lockdown() {
         recipients_file="${2:-}"
         shift 2
         ;;
-      --passphrase|--pass)
-        passphrase="${2:-}"
-        shift 2
-        ;;
-      --passphrase-stdin)
-        passphrase_stdin=1
-        shift
-        ;;
-      --generate-pass)
-        generate_pass=1
-        shift
+      --passphrase|--pass|--passphrase-stdin|--generate-pass)
+        passphrase_removed
         ;;
       -h|--help)
         usage
@@ -355,23 +400,27 @@ cmd_lockdown() {
     echo "error: recipients file not found: $recipients_file" >&2
     exit 1
   fi
-  if { [ ${#recipients[@]} -gt 0 ] || [ -n "$recipients_file" ]; } && { [ -n "$passphrase" ] || [ "$passphrase_stdin" -eq 1 ] || [ "$generate_pass" -eq 1 ]; }; then
-    echo "error: cannot use passphrase options with recipient mode" >&2
-    exit 1
-  fi
 
   if [ -f "$VAULT_FILE" ]; then
     echo "error: $VAULT_FILE already exists — already locked? run 'vault unlock' first" >&2
     exit 1
   fi
 
-  paths=()
+  local paths=()
   while IFS= read -r line; do
     paths+=("$line")
   done < <(read_paths)
 
   if [ ${#paths[@]} -eq 0 ]; then
     echo "nothing to lock — no sensitive files found"
+    exit 0
+  fi
+
+  if [ "$dry_run" -eq 1 ]; then
+    echo "would lock ${#paths[@]} path(s):"
+    printf '  %s\n' "${paths[@]}"
+    echo ""
+    echo "dry run — nothing encrypted, nothing removed"
     exit 0
   fi
 
@@ -385,7 +434,7 @@ cmd_lockdown() {
   local tmp_tar
   tmp_tar="$(mktemp)"
   trap 'rm -f "$tmp_tar"' RETURN
-  tar -cf "$tmp_tar" -C "$HOME" "${paths[@]/#$HOME\//}" 2> >(grep -v 'socket ignored' >&2)
+  tar -cf "$tmp_tar" -P "${paths[@]}" 2> >(grep -v 'socket ignored' >&2)
 
   echo ""
   echo "WARNING: if you lose your passphrase, you will lose access to all locked files."
@@ -400,17 +449,18 @@ cmd_lockdown() {
         [ -n "$r" ] && age_args+=("-r" "$r")
       done
     fi
-    age -o "$VAULT_FILE" "${age_args[@]}" "$tmp_tar"
-  else
-    if [ "$generate_pass" -eq 1 ]; then
-      passphrase="$(generate_passphrase)"
-    else
-      passphrase="$(ensure_passphrase_create "default" "$passphrase" "$passphrase_stdin")"
-    fi
-    export AGE_PASSPHRASE="$passphrase"
+    age -o "$VAULT_FILE" ${age_args[@]+"${age_args[@]}"} "$tmp_tar"
+  elif keychain_available; then
+    local secret recipient
+    secret="$(ensure_identity_create "default")"
+    recipient="$(recipient_for_secret "$secret")"
+    age -r "$recipient" -o "$VAULT_FILE" "$tmp_tar"
+  elif can_use_tty; then
+    # no keyring, so age owns the prompt and vault stores nothing
     age -p -o "$VAULT_FILE" "$tmp_tar"
-    unset AGE_PASSPHRASE
-    keychain_set "default" "$passphrase" || true
+  else
+    echo "error: no keyring and no terminal — use --recipient or --recipients-file" >&2
+    exit 1
   fi
   rm -f "$tmp_tar"
 
@@ -452,22 +502,12 @@ cmd_lockdown() {
 cmd_unlock() {
   check_deps age
   local keep_keychain=0
-  local passphrase=""
-  local passphrase_stdin=0
   local identity_files=()
   local identity_stdin=0
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
       --keep-keychain)
         keep_keychain=1
-        shift
-        ;;
-      --passphrase|--pass)
-        passphrase="${2:-}"
-        shift 2
-        ;;
-      --passphrase-stdin)
-        passphrase_stdin=1
         shift
         ;;
       --identity-file)
@@ -477,6 +517,9 @@ cmd_unlock() {
       --identity-stdin)
         identity_stdin=1
         shift
+        ;;
+      --passphrase|--pass|--passphrase-stdin|--generate-pass)
+        passphrase_removed
         ;;
       -h|--help)
         usage
@@ -502,23 +545,15 @@ cmd_unlock() {
   else
     identity_files+=("$VAULT_IDENTITY_FILE")
   fi
-  if { [ ${#identity_files[@]} -gt 0 ] || [ "$identity_stdin" -eq 1 ] || [ -n "${VAULT_IDENTITY_FILE:-}" ]; } && { [ -n "$passphrase" ] || [ "$passphrase_stdin" -eq 1 ]; }; then
-    echo "error: cannot use passphrase options with identity mode" >&2
-    exit 1
-  fi
 
   if [ "$identity_stdin" -eq 1 ]; then
-    if [ "$passphrase_stdin" -eq 1 ]; then
-      echo "error: cannot use --identity-stdin and --passphrase-stdin together" >&2
-      exit 1
-    fi
     identity_tmp="$(mktemp)"
     cat > "$identity_tmp"
     identity_files+=("$identity_tmp")
   fi
 
   if [ ${#identity_files[@]} -gt 0 ]; then
-    for id in "${identity_files[@]}"; do
+    for id in ${identity_files[@]+"${identity_files[@]}"}; do
       if [ ! -f "$id" ]; then
         echo "error: identity file not found: $id" >&2
         exit 1
@@ -528,14 +563,19 @@ cmd_unlock() {
     for id in "${identity_files[@]}"; do
       [ -n "$id" ] && age_args+=("-i" "$id")
     done
-    age --decrypt -o "$tmp_tar" "${age_args[@]}" "$VAULT_FILE"
+    age --decrypt -o "$tmp_tar" ${age_args[@]+"${age_args[@]}"} "$VAULT_FILE"
   else
-    passphrase="$(ensure_passphrase_open "default" "$passphrase" "$passphrase_stdin")"
-    export AGE_PASSPHRASE="$passphrase"
-    age --decrypt -o "$tmp_tar" "$VAULT_FILE"
-    unset AGE_PASSPHRASE
+    local secret idfile
+    if secret="$(ensure_identity_open "default")"; then
+      idfile="$(mktemp)"
+      identity_to_file "$secret" "$idfile"
+      age --decrypt -i "$idfile" -o "$tmp_tar" "$VAULT_FILE"
+      rm -f "$idfile"
+    else
+      age --decrypt -o "$tmp_tar" "$VAULT_FILE"
+    fi
   fi
-  tar -xf "$tmp_tar" -C "$HOME"
+  tar -xf "$tmp_tar" -P -C "$HOME"
   rm -f "$tmp_tar"
   [ -n "$identity_tmp" ] && rm -f "$identity_tmp"
 
@@ -549,19 +589,14 @@ cmd_unlock() {
 cmd_create() {
   check_deps age
 
-  local passphrase=""
-  local passphrase_stdin=0
   local recipients=()
   local recipients_file=""
-  local generate_pass=0
   while [[ "${1:-}" == --* ]]; do
     case "$1" in
       --recipient) recipients+=("${2:-}"); shift 2 ;;
       --recipients-file) recipients_file="${2:-}"; shift 2 ;;
-      --passphrase|--pass) passphrase="${2:-}"; shift 2 ;;
-      --passphrase-stdin) passphrase_stdin=1; shift ;;
-      --generate-pass) generate_pass=1; shift ;;
       --) shift; break ;;
+      --passphrase|--pass|--passphrase-stdin|--generate-pass) passphrase_removed ;;
       -h|--help) usage; exit 0 ;;
       *) echo "unknown option: $1" >&2; exit 1 ;;
     esac
@@ -580,9 +615,6 @@ cmd_create() {
     case "$1" in
       --recipient) recipients+=("${2:-}"); shift 2 ;;
       --recipients-file) recipients_file="${2:-}"; shift 2 ;;
-      --passphrase|--pass) passphrase="${2:-}"; shift 2 ;;
-      --passphrase-stdin) passphrase_stdin=1; shift ;;
-      --generate-pass) generate_pass=1; shift ;;
       --) shift; break ;;
       *) break ;;
     esac
@@ -621,6 +653,13 @@ cmd_create() {
     paths+=("$expanded")
   done
 
+  if [ -z "$recipients_file" ] && [ -n "${VAULT_RECIPIENTS_FILE:-}" ]; then
+    recipients_file="$VAULT_RECIPIENTS_FILE"
+  fi
+  if [ -n "$recipients_file" ] && [ ! -f "$recipients_file" ]; then
+    echo "error: recipients file not found: $recipients_file" >&2
+    exit 1
+  fi
   echo "locking ${#paths[@]} path(s) to named vault '$name':"
   printf '  %s\n' "${paths[@]}"
 
@@ -635,17 +674,6 @@ cmd_create() {
   echo "WARNING: if you lose your passphrase, you will lose access to this vault."
   echo ""
 
-  if [ -z "$recipients_file" ] && [ -n "${VAULT_RECIPIENTS_FILE:-}" ]; then
-    recipients_file="$VAULT_RECIPIENTS_FILE"
-  fi
-  if [ -n "$recipients_file" ] && [ ! -f "$recipients_file" ]; then
-    echo "error: recipients file not found: $recipients_file" >&2
-    exit 1
-  fi
-  if { [ ${#recipients[@]} -gt 0 ] || [ -n "$recipients_file" ]; } && { [ -n "$passphrase" ] || [ "$passphrase_stdin" -eq 1 ] || [ "$generate_pass" -eq 1 ]; }; then
-    echo "error: cannot use passphrase options with recipient mode" >&2
-    exit 1
-  fi
 
   if [ ${#recipients[@]} -gt 0 ] || [ -n "$recipients_file" ]; then
     local age_args=()
@@ -657,17 +685,18 @@ cmd_create() {
         [ -n "$r" ] && age_args+=("-r" "$r")
       done
     fi
-    age -o "$vault_file" "${age_args[@]}" "$tmp_tar"
-  else
-    if [ "$generate_pass" -eq 1 ]; then
-      passphrase="$(generate_passphrase)"
-    else
-      passphrase="$(ensure_passphrase_create "$name" "$passphrase" "$passphrase_stdin")"
-    fi
-    export AGE_PASSPHRASE="$passphrase"
+    age -o "$vault_file" ${age_args[@]+"${age_args[@]}"} "$tmp_tar"
+  elif keychain_available; then
+    local secret recipient
+    secret="$(ensure_identity_create "$name")"
+    recipient="$(recipient_for_secret "$secret")"
+    age -r "$recipient" -o "$vault_file" "$tmp_tar"
+  elif can_use_tty; then
+    # no keyring, so age owns the prompt and vault stores nothing
     age -p -o "$vault_file" "$tmp_tar"
-    unset AGE_PASSPHRASE
-    keychain_set "$name" "$passphrase" || true
+  else
+    echo "error: no keyring and no terminal — use --recipient or --recipients-file" >&2
+    exit 1
   fi
   rm -f "$tmp_tar"
 
@@ -695,8 +724,6 @@ cmd_create() {
 cmd_open() {
   check_deps age
 
-  local passphrase=""
-  local passphrase_stdin=0
   local keep_keychain=0
   local identity_files=()
   local identity_stdin=0
@@ -714,17 +741,12 @@ cmd_open() {
         identity_stdin=1
         shift
         ;;
-      --passphrase|--pass)
-        passphrase="${2:-}"
-        shift 2
-        ;;
-      --passphrase-stdin)
-        passphrase_stdin=1
-        shift
-        ;;
       --)
         shift
         break
+        ;;
+      --passphrase|--pass|--passphrase-stdin|--generate-pass)
+        passphrase_removed
         ;;
       -h|--help)
         usage
@@ -751,8 +773,6 @@ cmd_open() {
       --keep-keychain) keep_keychain=1; shift ;;
       --identity-file) identity_files+=("${2:-}"); shift 2 ;;
       --identity-stdin) identity_stdin=1; shift ;;
-      --passphrase|--pass) passphrase="${2:-}"; shift 2 ;;
-      --passphrase-stdin) passphrase_stdin=1; shift ;;
       --) shift; break ;;
       *) break ;;
     esac
@@ -775,23 +795,15 @@ cmd_open() {
   else
     identity_files+=("$VAULT_IDENTITY_FILE")
   fi
-  if { [ ${#identity_files[@]} -gt 0 ] || [ "$identity_stdin" -eq 1 ] || [ -n "${VAULT_IDENTITY_FILE:-}" ]; } && { [ -n "$passphrase" ] || [ "$passphrase_stdin" -eq 1 ]; }; then
-    echo "error: cannot use passphrase options with identity mode" >&2
-    exit 1
-  fi
 
   if [ "$identity_stdin" -eq 1 ]; then
-    if [ "$passphrase_stdin" -eq 1 ]; then
-      echo "error: cannot use --identity-stdin and --passphrase-stdin together" >&2
-      exit 1
-    fi
     identity_tmp="$(mktemp)"
     cat > "$identity_tmp"
     identity_files+=("$identity_tmp")
   fi
 
   if [ ${#identity_files[@]} -gt 0 ]; then
-    for id in "${identity_files[@]}"; do
+    for id in ${identity_files[@]+"${identity_files[@]}"}; do
       if [ ! -f "$id" ]; then
         echo "error: identity file not found: $id" >&2
         exit 1
@@ -801,12 +813,17 @@ cmd_open() {
     for id in "${identity_files[@]}"; do
       [ -n "$id" ] && age_args+=("-i" "$id")
     done
-    age --decrypt -o "$tmp_tar" "${age_args[@]}" "$vault_file"
+    age --decrypt -o "$tmp_tar" ${age_args[@]+"${age_args[@]}"} "$vault_file"
   else
-    passphrase="$(ensure_passphrase_open "$name" "$passphrase" "$passphrase_stdin")"
-    export AGE_PASSPHRASE="$passphrase"
-    age --decrypt -o "$tmp_tar" "$vault_file"
-    unset AGE_PASSPHRASE
+    local secret idfile
+    if secret="$(ensure_identity_open "$name")"; then
+      idfile="$(mktemp)"
+      identity_to_file "$secret" "$idfile"
+      age --decrypt -i "$idfile" -o "$tmp_tar" "$vault_file"
+      rm -f "$idfile"
+    else
+      age --decrypt -o "$tmp_tar" "$vault_file"
+    fi
   fi
   tar -xf "$tmp_tar" -P
   rm -f "$tmp_tar"
@@ -845,8 +862,9 @@ cmd_scan() {
   add_path() {
     local p="$1"
     local label="$2"
-    local entry="\$HOME/${p#"$HOME"/}"
-    if ! rg -qF "$entry" "$PATHS_FILE"; then
+    local entry="$p"
+    [[ "$p" == "$HOME/"* ]] && entry="\$HOME/${p#"$HOME"/}"
+    if ! rg -qxF "$entry" "$PATHS_FILE"; then
       echo "$entry" >> "$PATHS_FILE"
       echo "  added: $entry ($label)"
       found=$((found + 1))

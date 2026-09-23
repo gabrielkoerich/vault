@@ -6,6 +6,11 @@ VAULT="$ROOT/vault"
 
 tmp="$(mktemp -d)"
 cleanup() {
+  case "${VAULT_KEYCHAIN:-}" in
+    "$tmp"/*)
+      [ -f "$VAULT_KEYCHAIN" ] && security delete-keychain "$VAULT_KEYCHAIN" 2>/dev/null || true
+      ;;
+  esac
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -19,6 +24,16 @@ export KEYCHAIN_DELETE_CONFIRM="no"
 export VAULT_NO_ENV_SCAN="1"
 
 mkdir -p "$HOME" "$VAULT_CONFIG_DIR"
+
+# security resolves the default keychain through $HOME, which the tests fake.
+# Without a keychain of our own it shows a modal dialog and hangs on CI.
+export VAULT_IDENTITY_KIND=plain
+unset VAULT_KEYCHAIN   # never inherit a real keychain from the environment
+if [ "$(uname)" = "Darwin" ] && command -v security >/dev/null 2>&1; then
+  export VAULT_KEYCHAIN="$tmp/test.keychain-db"
+  security create-keychain -p "" "$VAULT_KEYCHAIN"
+  security unlock-keychain -p "" "$VAULT_KEYCHAIN"
+fi
 printf 'DELETE_METHOD=rm\nENV_SCAN_DIRS=%s\nEXCLUDE_PATHS=\n' "$HOME" > "$VAULT_CONFIG_DIR/settings"
 
 case "$HOME" in
@@ -37,6 +52,12 @@ case "$VAULT_FILE" in
   "$tmp"/*) : ;;
   *) echo "refusing to run: VAULT_FILE is not in temp dir" >&2; exit 1 ;;
 esac
+if [ -n "${VAULT_KEYCHAIN:-}" ]; then
+  case "$VAULT_KEYCHAIN" in
+    "$tmp"/*) : ;;
+    *) echo "refusing to run: VAULT_KEYCHAIN is not in temp dir" >&2; exit 1 ;;
+  esac
+fi
 
 expect_fail() {
   if "$@"; then
@@ -106,54 +127,33 @@ expect_fail "$VAULT" open rec --identity-file "$tmp/missing.key"
 expect_fail "$VAULT" create rec2 --recipients-file "$tmp/missing.recipients" "$HOME/rec.txt"
 echo "ok - error cases"
 
-# --- generate-pass + keychain tests (macOS interactive only) ---
-# age -p always reads passphrase from /dev/tty; these cannot run non-interactively.
-if can_use_tty && [ "$(uname)" = "Darwin" ] && command -v security >/dev/null 2>&1; then
-  echo "gen" > "$HOME/gen.txt"
-  "$VAULT" create gen --generate-pass "$HOME/gen.txt"
-  test -f "$VAULTS_DIR/gen.tar.age"
-  test ! -e "$HOME/gen.txt"
-  "$VAULT" open gen
-  test -f "$HOME/gen.txt"
-  grep -q "gen" "$HOME/gen.txt"
-  echo "ok - generate-pass + keychain tests"
+# --- keychain identity mode (no terminal needed) ---
+if [ -n "${VAULT_KEYCHAIN:-}" ]; then
+  echo "idv" > "$HOME/idv.txt"
+  "$VAULT" create idv "$HOME/idv.txt"
+  test -f "$VAULTS_DIR/idv.tar.age"
+  test ! -e "$HOME/idv.txt"
+  "$VAULT" open idv
+  test -f "$HOME/idv.txt"
+  grep -q "idv" "$HOME/idv.txt"
+  echo "ok - keychain identity round trip"
+
+  # a missing keychain must fail fast rather than block on a dialog
+  (
+    unset VAULT_KEYCHAIN
+    export HOME="$tmp/nokeychain"
+    mkdir -p "$HOME"
+    echo "x" > "$HOME/x.txt"
+    expect_fail "$VAULT" create nokc "$HOME/x.txt"
+  )
+  echo "ok - missing keychain fails fast"
 fi
 
-# --- explicit passphrase tests (interactive only, age -p requires /dev/tty) ---
-if can_use_tty; then
-  passphrase="testpass-123"
-  echo "badpass" > "$HOME/badpass.txt"
-  "$VAULT" create badpass --passphrase "$passphrase" "$HOME/badpass.txt"
-  expect_fail "$VAULT" open badpass --passphrase "wrong"
-  test -f "$VAULTS_DIR/badpass.tar.age"
-  test ! -e "$HOME/badpass.txt"
-
-  expect_fail "$VAULT" open missing --passphrase "x"
-  expect_fail "$VAULT" create missingpath --passphrase "x" "$HOME/does-not-exist"
-
-  echo "dup" > "$HOME/dup.txt"
-  "$VAULT" create dup --passphrase "x" "$HOME/dup.txt"
-  expect_fail "$VAULT" create dup --passphrase "x" "$HOME/dup.txt"
-  # identity-stdin cannot open a passphrase-encrypted vault
-  expect_fail bash -c "cat '$tmp/ci.key' | '$VAULT' open dup --identity-stdin"
-  "$VAULT" open dup --passphrase "x"
-
-  echo "mix" > "$HOME/mix.txt"
-  expect_fail "$VAULT" create mix --passphrase "x" --recipient "$pubkey" "$HOME/mix.txt"
-  echo "ok - explicit passphrase tests"
-fi
-
-# --- keychain tests (macOS interactive only) ---
-if can_use_tty && [ "$(uname)" = "Darwin" ] && command -v security >/dev/null 2>&1; then
-  echo "kc" > "$HOME/kc.txt"
-  security add-generic-password -a "$USER" -s "${KEYCHAIN_PREFIX}:kc" -w "kcpass" -U >/dev/null
-  "$VAULT" create kc "$HOME/kc.txt"
-  test -f "$VAULTS_DIR/kc.tar.age"
-  test ! -e "$HOME/kc.txt"
-  "$VAULT" open kc
-  test -f "$HOME/kc.txt"
-  expect_fail security find-generic-password -a "$USER" -s "${KEYCHAIN_PREFIX}:kc" >/dev/null
-  echo "ok - keychain tests"
-fi
+# --- removed passphrase flags are rejected, not silently ignored ---
+echo "rej" > "$HOME/rej.txt"
+expect_fail "$VAULT" create rej --passphrase "x" "$HOME/rej.txt"
+expect_fail "$VAULT" create rej --generate-pass "$HOME/rej.txt"
+test -e "$HOME/rej.txt"
+echo "ok - passphrase flags rejected"
 
 echo "ok"
