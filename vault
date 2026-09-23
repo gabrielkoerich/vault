@@ -87,13 +87,34 @@ is_darwin() {
 # security resolves the default keychain through $HOME. With $HOME faked, as the
 # tests do, it puts up a modal dialog and blocks forever on a headless runner.
 # Refuse to call it unless a keychain is actually there.
-keychain_available() {
-  is_darwin || return 1
-  if [ -n "${VAULT_KEYCHAIN:-}" ]; then
-    [ -f "$VAULT_KEYCHAIN" ]
-    return
+# macOS keychain, or libsecret on Linux
+secret_backend() {
+  if is_darwin; then
+    echo "security"
+  elif command -v secret-tool >/dev/null 2>&1; then
+    echo "secret-tool"
+  else
+    echo "none"
   fi
-  [ -f "$HOME/Library/Keychains/login.keychain-db" ]
+}
+
+keychain_available() {
+  case "$(secret_backend)" in
+    security)
+      if [ -n "${VAULT_KEYCHAIN:-}" ]; then
+        [ -f "$VAULT_KEYCHAIN" ]
+        return
+      fi
+      [ -f "$HOME/Library/Keychains/login.keychain-db" ]
+      ;;
+    secret-tool) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# only true for a terminal we can actually open, age reads passphrases from /dev/tty
+can_use_tty() {
+  { exec 3</dev/tty && exec 3>&-; } 2>/dev/null
 }
 
 keychain_get() {
@@ -101,7 +122,9 @@ keychain_get() {
   keychain_available || return 1
   local service
   service="$(keychain_service_for "$name")"
-  if [ -n "${VAULT_KEYCHAIN:-}" ]; then
+  if [ "$(secret_backend)" = "secret-tool" ]; then
+    secret-tool lookup service "$service" account "$USER" 2>/dev/null
+  elif [ -n "${VAULT_KEYCHAIN:-}" ]; then
     security find-generic-password -a "$USER" -s "$service" -w "$VAULT_KEYCHAIN" 2>/dev/null
   else
     security find-generic-password -a "$USER" -s "$service" -w 2>/dev/null
@@ -114,7 +137,10 @@ keychain_set() {
   keychain_available || return 1
   local service
   service="$(keychain_service_for "$name")"
-  if [ -n "${VAULT_KEYCHAIN:-}" ]; then
+  if [ "$(secret_backend)" = "secret-tool" ]; then
+    # secret-tool reads the value from stdin, so it never lands in argv
+    printf '%s' "$passphrase" | secret-tool store --label="vault: $service" service "$service" account "$USER"
+  elif [ -n "${VAULT_KEYCHAIN:-}" ]; then
     security add-generic-password -a "$USER" -s "$service" -w "$passphrase" -U "$VAULT_KEYCHAIN" >/dev/null
   else
     security add-generic-password -a "$USER" -s "$service" -w "$passphrase" -U >/dev/null
@@ -126,6 +152,10 @@ keychain_delete() {
   keychain_available || return 1
   local service
   service="$(keychain_service_for "$name")"
+  if [ "$(secret_backend)" = "secret-tool" ]; then
+    secret-tool clear service "$service" account "$USER" 2>/dev/null || true
+    return 0
+  fi
   if security find-generic-password -a "$USER" -s "$service" ${VAULT_KEYCHAIN:+"$VAULT_KEYCHAIN"} >/dev/null 2>&1; then
     if [[ "$KEYCHAIN_DELETE_CONFIRM" == "yes" ]]; then
       read -p "delete keychain entry '$service'? (y/N) " -n 1 -r < /dev/tty
@@ -225,8 +255,7 @@ ensure_identity_open() {
   local secret
   secret="$(keychain_get "$name" || true)"
   if [ -z "$secret" ]; then
-    echo "error: no identity in the keychain for '$(keychain_service_for "$name")'" >&2
-    echo "if this vault was made with a passphrase, age will ask for it" >&2
+    keychain_available && echo "no stored identity for '$(keychain_service_for "$name")', age will ask for a passphrase" >&2
     return 1
   fi
   printf '%s' "$secret"
@@ -421,11 +450,17 @@ cmd_lockdown() {
       done
     fi
     age -o "$VAULT_FILE" ${age_args[@]+"${age_args[@]}"} "$tmp_tar"
-  else
+  elif keychain_available; then
     local secret recipient
     secret="$(ensure_identity_create "default")"
     recipient="$(recipient_for_secret "$secret")"
     age -r "$recipient" -o "$VAULT_FILE" "$tmp_tar"
+  elif can_use_tty; then
+    # no keyring, so age owns the prompt and vault stores nothing
+    age -p -o "$VAULT_FILE" "$tmp_tar"
+  else
+    echo "error: no keyring and no terminal — use --recipient or --recipients-file" >&2
+    exit 1
   fi
   rm -f "$tmp_tar"
 
@@ -651,11 +686,17 @@ cmd_create() {
       done
     fi
     age -o "$vault_file" ${age_args[@]+"${age_args[@]}"} "$tmp_tar"
-  else
+  elif keychain_available; then
     local secret recipient
     secret="$(ensure_identity_create "$name")"
     recipient="$(recipient_for_secret "$secret")"
     age -r "$recipient" -o "$vault_file" "$tmp_tar"
+  elif can_use_tty; then
+    # no keyring, so age owns the prompt and vault stores nothing
+    age -p -o "$vault_file" "$tmp_tar"
+  else
+    echo "error: no keyring and no terminal — use --recipient or --recipients-file" >&2
+    exit 1
   fi
   rm -f "$tmp_tar"
 
