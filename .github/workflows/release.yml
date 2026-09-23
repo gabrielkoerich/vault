@@ -58,8 +58,28 @@ jobs:
           chmod +x tests/run.sh
           ./tests/run.sh
 
+  test-macos:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install age fd
+
+      - name: Smoke test
+        run: |
+          chmod +x vault
+          ./vault version
+          ./vault help
+
+      - name: Run tests
+        run: |
+          chmod +x tests/run.sh
+          ./tests/run.sh
+
   release:
-    needs: [lint, gitleaks, test-ubuntu]
+    needs: [lint, gitleaks, test-ubuntu, test-macos]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
