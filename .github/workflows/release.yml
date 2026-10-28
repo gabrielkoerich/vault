@@ -59,13 +59,27 @@ jobs:
           ./tests/run.sh
 
   test-macos:
-    runs-on: macos-latest
+    runs-on: [self-hosted, macOS, ARM64, m1]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
+      # Pinned release binaries, the M1's CI account has no Homebrew of its own
       - name: Install dependencies
-        run: brew install age fd
+        run: |
+          bin="$RUNNER_TEMP/bin"
+          mkdir -p "$bin"
+          cd "$RUNNER_TEMP"
+          curl -fsSLO https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-darwin-arm64.tar.gz
+          curl -fsSLO https://github.com/sharkdp/fd/releases/download/v10.5.0/fd-v10.5.0-aarch64-apple-darwin.tar.gz
+          shasum -a 256 -c <<'SUMS'
+          e2020b073c44f692685a24d6abc378817eb81ffaaf49fd0531ef8565f767f2f5  age-v1.3.2-darwin-arm64.tar.gz
+          b67e1836c468e42e411984b56e52fa7abec08c2bd22c867398e7cc134aac5e12  fd-v10.5.0-aarch64-apple-darwin.tar.gz
+          SUMS
+          tar -xzf age-v1.3.2-darwin-arm64.tar.gz
+          tar -xzf fd-v10.5.0-aarch64-apple-darwin.tar.gz
+          cp age/age age/age-keygen fd-v10.5.0-aarch64-apple-darwin/fd "$bin/"
+          echo "$bin" >> "$GITHUB_PATH"
 
       - name: Smoke test
         run: |
